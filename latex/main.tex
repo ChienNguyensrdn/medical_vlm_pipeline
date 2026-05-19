@@ -1,0 +1,78 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\title{Quantized Retrieval-Augmented Medical Vision-Language Diagnosis}
+
+\author{
+  \IEEEauthorblockN{Author Name}
+  \IEEEauthorblockA{Institution\\Email}
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This paper proposes a multimodal medical diagnosis pipeline that aligns medical images and clinical reports in a shared latent space, compresses the latent representation for efficient retrieval, and augments diagnostic reasoning with similar medical cases.
+\end{abstract}
+
+\begin{IEEEkeywords}
+medical vision-language model, retrieval-augmented generation, quantization, FAISS, explainable diagnosis
+\end{IEEEkeywords}
+
+\section{Introduction}
+Medical diagnosis from imaging data benefits from models that jointly reason over visual findings, historical reports, and related cases. We study a quantized retrieval-augmented vision-language pipeline for MRI, CT, and histopathology diagnosis.
+
+\section{Related Work}
+\subsection{Medical Vision-Language Learning}
+Review biomedical image-text representation learning, contrastive alignment, and clinical report modeling.
+
+\subsection{Retrieval-Augmented Medical Diagnosis}
+Discuss similar-case retrieval, case-based reasoning, and retrieval-augmented generation for clinical decision support.
+
+\subsection{Quantized Vector Retrieval}
+Discuss product quantization, vector quantization, and compressed nearest-neighbor search.
+
+\section{Method}
+\subsection{Image and Text Encoders}
+The image encoder maps MRI, CT, or histopathology inputs into visual embeddings. The text encoder maps clinical reports into biomedical text embeddings.
+
+\subsection{Cross-Modal Alignment}
+Image and report embeddings are projected into a shared latent space and optimized with a symmetric InfoNCE objective:
+\begin{equation}
+\mathcal{L} =
+- \log
+\frac{
+\exp(\mathrm{sim}(z_i, z_t) / \tau)
+}{
+\sum_j \exp(\mathrm{sim}(z_i, z_j) / \tau)
+}.
+\end{equation}
+
+\subsection{Quantized Retrieval}
+The aligned medical embeddings are compressed before indexing. At inference time, a query image embedding retrieves similar cases from a vector database.
+
+\subsection{Diagnosis and Report Generation}
+Retrieved cases provide context for disease classification and report generation.
+
+\section{Experiments}
+\subsection{Datasets}
+Candidate datasets include BraTS, FastMRI, IXI, MIMIC-CXR, CheXpert, CAMELYON, and PANDA.
+
+\subsection{Metrics}
+Evaluate classification accuracy, retrieval recall, report quality, calibration, latency, and compression ratio.
+
+\section{Discussion}
+Discuss explainability, uncertainty estimation, privacy, edge deployment, and clinical limitations.
+
+\section{Conclusion}
+We outline a research direction for efficient and explainable medical vision-language diagnosis through quantized retrieval-augmented reasoning.
+
+\nocite{*}
+\bibliographystyle{IEEEtran}
+\bibliography{../paper-refs/references}
+
+\end{document}

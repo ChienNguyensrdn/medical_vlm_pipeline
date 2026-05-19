@@ -1,0 +1,48 @@
+# Core scientific stack
+numpy
+pandas
+scipy
+scikit-learn
+tqdm
+
+# Deep learning
+torch
+torchvision
+torchaudio
+torchmetrics
+
+# Medical imaging
+monai
+pydicom
+nibabel
+SimpleITK
+scikit-image
+opencv-python-headless
+
+# Vision and language models
+timm
+transformers
+tokenizers
+sentencepiece
+accelerate
+einops
+
+# Retrieval and vector search
+faiss-cpu
+qdrant-client
+
+# Report generation and evaluation
+datasets
+evaluate
+rouge-score
+bert-score
+
+# Explainability and visualization
+grad-cam
+matplotlib
+seaborn
+
+# Experiment utilities
+pyyaml
+rich
+jupyterlab
