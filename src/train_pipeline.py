@@ -137,6 +137,14 @@ def main():
     # 6. Training Loop
     epochs = 10
     best_loss = float("inf")
+    
+    # Initialize metrics folder and CSV logging
+    metrics_dir = Path("report_kaggle")
+    metrics_dir.mkdir(exist_ok=True)
+    metrics_file = metrics_dir / "training_metrics.csv"
+    if metrics_file.exists():
+        metrics_file.unlink()
+        
     logger.info(f"Starting Joint Contrastive-Classification Training for {epochs} Epochs...")
 
     for epoch in range(1, epochs + 1):
@@ -204,11 +212,57 @@ def main():
         avg_contrastive = epoch_contrastive / num_batches
         avg_class = epoch_class / num_batches
 
+        # Collect predictions and targets for classification metrics evaluation
+        pipeline.eval()
+        all_preds = []
+        all_targets = []
+        with torch.no_grad():
+            for batch in train_loader:
+                images = batch["image"].to(device)
+                labels = batch["label"]
+                label_idxs = torch.tensor(
+                    [label_to_idx.get(lbl, 0) for lbl in labels], dtype=torch.long, device=device
+                )
+                logits = pipeline(images)
+                preds = torch.argmax(logits, dim=-1)
+                all_preds.extend(preds.cpu().numpy())
+                all_targets.extend(label_idxs.cpu().numpy())
+
+        # Calculate Accuracy, Precision, Recall, F1-Score
+        try:
+            from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+            accuracy = float(accuracy_score(all_targets, all_preds))
+            precision, recall, f1, _ = precision_recall_fscore_support(all_targets, all_preds, average="weighted", zero_division=0)
+            precision, recall, f1 = float(precision), float(recall), float(f1)
+        except ImportError:
+            correct = sum(1 for p, t in zip(all_preds, all_targets) if p == t)
+            accuracy = correct / len(all_targets) if len(all_targets) > 0 else 0.0
+            precision, recall, f1 = accuracy, accuracy, accuracy
+
+        # Append metrics to CSV for experiment logging
+        import csv
+        file_exists = metrics_file.exists()
+        with open(metrics_file, mode="a" if file_exists else "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["epoch", "total_loss", "contrastive_loss", "classification_loss", "accuracy", "precision", "recall", "f1_score", "learning_rate"])
+            writer.writerow([
+                epoch,
+                f"{avg_loss:.6f}",
+                f"{avg_contrastive:.6f}",
+                f"{avg_class:.6f}",
+                f"{accuracy:.6f}",
+                f"{precision:.6f}",
+                f"{recall:.6f}",
+                f"{f1:.6f}",
+                f"{optimizer.param_groups[0]['lr']:.8f}"
+            ])
+
         console.print(
             f"[bold green]✓ Epoch {epoch:02d}/{epochs:02d}[/bold green] | "
-            f"Total Loss: [bold cyan]{avg_loss:.4f}[/bold cyan] | "
-            f"Contrastive (InfoNCE): {avg_contrastive:.4f} | "
-            f"Classification: {avg_class:.4f}"
+            f"Loss: [bold cyan]{avg_loss:.4f}[/bold cyan] | "
+            f"Acc: [bold magenta]{accuracy * 100:.2f}%[/bold magenta] | "
+            f"F1: [bold yellow]{f1:.4f}[/bold yellow]"
         )
 
         # Save Best Checkpoint
