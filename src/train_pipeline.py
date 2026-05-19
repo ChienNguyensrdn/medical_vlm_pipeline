@@ -111,7 +111,47 @@ def generate_synthetic_cases(num_cases: int = 24) -> list[MedicalCase]:
             modality="Chest X-ray",
         )
         cases.append(case)
-    return cases
+def plot_training_metrics(csv_path: Path, output_path: Path):
+    """Generates loss and classification metrics curve plots from training CSV logs."""
+    try:
+        import matplotlib.pyplot as plt
+        import pandas as pd
+        
+        df = pd.read_csv(csv_path)
+        
+        fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+        
+        # Plot 1: Loss curves
+        axes[0].plot(df["epoch"], df["total_loss"], label="Total Joint Loss", color="#d62728", linewidth=2.5)
+        axes[0].plot(df["epoch"], df["contrastive_loss"], label="Contrastive InfoNCE Loss", color="#1f77b4", linestyle="--")
+        axes[0].plot(df["epoch"], df["classification_loss"], label="Classification CE Loss", color="#2ca02c", linestyle=":")
+        axes[0].set_title("Training Loss Curves", fontsize=14, fontweight="bold", pad=12)
+        axes[0].set_xlabel("Epoch", fontsize=12)
+        axes[0].set_ylabel("Loss Value", fontsize=12)
+        axes[0].grid(True, linestyle=":", alpha=0.6)
+        axes[0].legend(fontsize=10)
+        
+        # Plot 2: Performance metrics
+        axes[1].plot(df["epoch"], df["accuracy"] * 100, label="Accuracy (%)", color="#9467bd", linewidth=2.5)
+        
+        f1_vals = df["f1_score"]
+        if f1_vals.max() <= 1.0:
+            f1_vals = f1_vals * 100
+        axes[1].plot(df["epoch"], f1_vals, label="F1-Score (%)", color="#ff7f0e", linewidth=2.5)
+        
+        axes[1].set_title("Classification Performance Metrics", fontsize=14, fontweight="bold", pad=12)
+        axes[1].set_xlabel("Epoch", fontsize=12)
+        axes[1].set_ylabel("Percentage (%)", fontsize=12)
+        axes[1].grid(True, linestyle=":", alpha=0.6)
+        axes[1].legend(fontsize=10)
+        
+        plt.suptitle("Medical VLM End-to-End Joint Training Report", fontsize=16, fontweight="bold", y=0.98)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=200, bbox_inches="tight")
+        plt.close()
+        logger.info(f"Successfully generated training curves plot at: {output_path}")
+    except Exception as e:
+        logger.warning(f"Could not generate training curves plots: {e}")
 
 
 def main():
@@ -183,7 +223,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
 
     # 6. Training Loop
-    epochs = 10
+    epochs = 50
     best_loss = float("inf")
     
     # Initialize metrics folder and CSV logging
@@ -370,6 +410,9 @@ def main():
     with open(metrics_dir / "text_generation_metrics.json", "w", encoding="utf-8") as f:
         json.dump(text_metrics, f, indent=4)
     logger.info(f"Saved text generation evaluation metrics to {metrics_dir / 'text_generation_metrics.json'}")
+
+    # Generate training curves plot
+    plot_training_metrics(metrics_file, metrics_dir / "training_curves.png")
 
     # Validate end-to-end RAG Inference
     logger.info("Testing post-training RAG clinical diagnosis on query case...")
