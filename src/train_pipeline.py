@@ -4,6 +4,7 @@
 import os
 import sys
 import logging
+import argparse
 from pathlib import Path
 import torch
 from torch import nn
@@ -33,6 +34,53 @@ logging.basicConfig(
     handlers=[RichHandler(console=console, rich_tracebacks=True)],
 )
 logger = logging.getLogger("train_pipeline")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Train the quantized retrieval-augmented medical VLM pipeline."
+    )
+    parser.add_argument("--epochs", type=int, default=None, help="Number of training epochs.")
+    parser.add_argument("--batch-size", type=int, default=None, help="Training batch size.")
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cuda", "mps", "cpu"],
+        default="auto",
+        help="Training device. auto prefers CUDA, then Apple MPS, then CPU.",
+    )
+    parser.add_argument(
+        "--dataset-dir",
+        default="/kaggle/input/iu-chest-x-rays-cleaned",
+        help="Dataset directory containing cleaned_dataset.csv and resized_images/256.",
+    )
+    parser.add_argument(
+        "--synthetic-cases",
+        type=int,
+        default=32,
+        help="Number of synthetic fallback cases when the real dataset is unavailable.",
+    )
+    parser.add_argument(
+        "--skip-plot",
+        action="store_true",
+        help="Skip Matplotlib training curve generation for faster local smoke tests.",
+    )
+    return parser.parse_args()
+
+
+def select_device(requested_device: str = "auto") -> torch.device:
+    if requested_device == "cuda":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if requested_device == "mps":
+        is_mps_available = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+        return torch.device("mps" if is_mps_available else "cpu")
+    if requested_device == "cpu":
+        return torch.device("cpu")
+
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def calculate_lcs(x: list[str], y: list[str]) -> int:
@@ -117,6 +165,10 @@ def generate_synthetic_cases(num_cases: int = 24) -> list[MedicalCase]:
 def plot_training_metrics(csv_path: Path, output_path: Path):
     """Generates loss and classification metrics curve plots from training CSV logs."""
     try:
+        matplotlib_cache_dir = Path("artifacts/matplotlib").resolve()
+        matplotlib_cache_dir.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MPLCONFIGDIR", str(matplotlib_cache_dir))
+
         import matplotlib.pyplot as plt
         import pandas as pd
         
@@ -158,17 +210,26 @@ def plot_training_metrics(csv_path: Path, output_path: Path):
 
 
 def main():
+    args = parse_args()
+
     console.print("\n[bold cyan]============================================================[/bold cyan]")
     console.print("[bold white]   TRAINING & FINE-TUNING RETRIEVAL-AUGMENTED MEDICAL VLM   [/bold white]")
     console.print("[bold cyan]============================================================[/bold cyan]\n")
 
     # 1. Load Configurations
     config = PipelineConfig()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.epochs is not None:
+        config.training.epochs = args.epochs
+    if args.batch_size is not None:
+        config.training.batch_size = args.batch_size
+
+    device = select_device(args.device)
     logger.info(f"Using training accelerator device: {device}")
+    if args.device == "mps" and device.type != "mps":
+        logger.warning("Apple MPS was requested but is not available in this Python/PyTorch environment.")
 
     # Define actual dataset paths
-    dataset_dir = "/kaggle/input/iu-chest-x-rays-cleaned"
+    dataset_dir = args.dataset_dir
     csv_path = os.path.join(dataset_dir, "cleaned_dataset.csv")
     images_dir = os.path.join(dataset_dir, "resized_images/256")
 
@@ -180,7 +241,7 @@ def main():
         logger.warning(
             f"Dataset CSV not found at: {csv_path}. Falling back to high-quality synthetic dry-run."
         )
-        train_cases = generate_synthetic_cases(num_cases=32)
+        train_cases = generate_synthetic_cases(num_cases=args.synthetic_cases)
 
     if not train_cases:
         logger.error("No training cases loaded. Exiting.")
@@ -188,9 +249,9 @@ def main():
 
     # 3. Instantiate Tokenizer & Wrapper
     # Use fallback Bidirectional LSTM or HuggingFace Tokenizer
-    from transformers import AutoTokenizer
-
     try:
+        from transformers import AutoTokenizer
+
         logger.info(f"Loading medical text tokenizer: {config.encoders.text_encoder}")
         tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
     except Exception as e:
@@ -207,9 +268,9 @@ def main():
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=8,
+        batch_size=config.training.batch_size,
         shuffle=True,
-        drop_last=len(train_dataset) > 8,
+        drop_last=len(train_dataset) > config.training.batch_size,
     )
 
     # 4. Instantiate VLM Pipeline
@@ -222,11 +283,18 @@ def main():
 
     # 5. Define Optimizers & Schedulers
     # Separate parameters into encoder/heads for customized learning rates if needed
-    optimizer = torch.optim.AdamW(pipeline.parameters(), lr=1e-4, weight_decay=1e-2)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+    optimizer = torch.optim.AdamW(
+        pipeline.parameters(),
+        lr=config.training.learning_rate,
+        weight_decay=1e-2,
+    )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=max(config.training.epochs, 1),
+    )
 
     # 6. Training Loop
-    epochs = 50
+    epochs = config.training.epochs
     best_loss = float("inf")
     
     # Initialize metrics folder and CSV logging
@@ -415,7 +483,10 @@ def main():
     logger.info(f"Saved text generation evaluation metrics to {metrics_dir / 'text_generation_metrics.json'}")
 
     # Generate training curves plot
-    plot_training_metrics(metrics_file, metrics_dir / "training_curves.png")
+    if args.skip_plot:
+        logger.info("Skipping training curves plot generation as requested.")
+    else:
+        plot_training_metrics(metrics_file, metrics_dir / "training_curves.png")
 
     # Validate end-to-end RAG Inference
     logger.info("Testing post-training RAG clinical diagnosis on query case...")

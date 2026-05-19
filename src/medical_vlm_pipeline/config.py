@@ -15,8 +15,8 @@ class DataConfig:
 
 @dataclass
 class EncoderConfig:
-    image_encoder: str = "swin"
-    text_encoder: str = "pubmedbert"
+    image_encoder: str = "swin_tiny_patch4_window7_224"
+    text_encoder: str = "microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext"
     embedding_dim: int = 768
     projection_dim: int = 256
 
@@ -32,7 +32,7 @@ class RetrievalConfig:
 @dataclass
 class TrainingConfig:
     batch_size: int = 16
-    epochs: int = 20
+    epochs: int = 10
     learning_rate: float = 1e-4
     temperature: float = 0.07
 

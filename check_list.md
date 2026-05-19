@@ -47,6 +47,7 @@ This checklist tracks the progress of the 10-stage Quantized Retrieval-Augmented
 - [x] Thiết lập mã nguồn dưới dạng gói package Python độc lập cấu trúc rõ ràng.
 - [x] Xây dựng tệp cấu hình trung tâm `config.py` linh hoạt.
 - [x] Tạo lập tệp tin Kaggle Notebook mẫu **`run_on_kaggle.ipynb`** hỗ trợ triển khai huấn luyện siêu tốc trên GPU đám mây.
+- [x] Tích hợp bộ đo lường và theo dõi hiệu năng từng bước xử lý (**Step-by-step Performance Profiler**) cho luồng chẩn đoán đầu cuối (latency, shapes, codebooks, reconstruction MSE, similarity scores).
 - [x] Vượt qua tất cả kiểm thử kiểm nghiệm toàn trình `demo_pipeline.py` với tỉ lệ thành công **100%**.
 
 ---
@@ -58,7 +59,10 @@ This checklist tracks the progress of the 10-stage Quantized Retrieval-Augmented
    - Kết nối với các kho dữ liệu y khoa mở thực tế như **MIMIC-CXR** (ảnh X-quang phổi ghép cặp báo cáo) hoặc **BraTS** (ảnh cộng hưởng từ MRI não 3D).
 
 2. **Fine-tuning mô hình ngôn ngữ (Seq2Seq / LLM Fine-tuning):**
-   - Tinh chỉnh lớp chiếu Visual-to-Language Projection trên tập dữ liệu thực tế để tăng điểm đánh giá sinh ngôn ngữ tự động (BLEU, ROUGE, BERTScore).
+   - [x] Đã tích hợp và tự động đánh giá các metric NLP y khoa tiêu chuẩn: **BLEU-1**, **BLEU-4**, **ROUGE-L** bằng `nltk` (với cơ chế lcs fallback an toàn).
+   - [x] Tự động xuất kết quả đánh giá sinh báo cáo lâm sàng ra tệp **`report_kaggle/text_generation_metrics.json`**.
 
 3. **Cải tiến độ tin cậy và phân tích sai lệch (Uncertainty Estimation):**
-   - Triển khai phương pháp Bayesian Deep Learning hoặc Monte Carlo Dropout trên đầu phân loại để ước lượng mức độ không chắc chắn (Uncertainty) trước khi xuất báo cáo.
+   - [x] Triển khai thành công phương pháp **Monte Carlo (MC) Dropout** trên đầu phân loại `DiagnosisHead`.
+   - [x] Tự động ước lượng **Epistemic Uncertainty (độ không chắc chắn nhận thức)** thông qua Entropy của phân phối xác xuất lấy mẫu đa lần ($N=20$) ngay trong luồng `pipeline.diagnose()`.
+   - [x] Đã kiểm nghiệm toàn trình qua `demo_pipeline.py` và hiển thị trực quan chỉ số Entropy trên báo cáo.

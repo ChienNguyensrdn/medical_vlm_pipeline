@@ -146,3 +146,9 @@ cython_debug/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Large model weights and vector indices
+*.pt
+*.index
+data/
+

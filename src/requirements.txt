@@ -4,6 +4,7 @@ pandas
 scipy
 scikit-learn
 tqdm
+pillow
 
 # Deep learning
 torch
@@ -36,6 +37,7 @@ datasets
 evaluate
 rouge-score
 bert-score
+nltk
 
 # Explainability and visualization
 grad-cam

@@ -81,11 +81,18 @@ class ProductQuantizer(LatentQuantizer):
         if N < self.num_centroids:
             logger.warning("Fewer sample embeddings than centroids. Using random centroids.")
             random_centroids = np.random.randn(self.num_subvectors, self.num_centroids, self.subvector_dim)
-            self.codebooks.copy_(torch.tensor(random_centroids, dtype=torch.float32))
+            self.codebooks.copy_(
+                torch.tensor(random_centroids, dtype=torch.float32, device=self.codebooks.device)
+            )
             self.is_fitted = True
             return
 
-        new_codebooks = torch.zeros(self.num_subvectors, self.num_centroids, self.subvector_dim)
+        new_codebooks = torch.zeros(
+            self.num_subvectors,
+            self.num_centroids,
+            self.subvector_dim,
+            device=self.codebooks.device,
+        )
 
         for m in range(self.num_subvectors):
             sub_start = m * self.subvector_dim
@@ -95,7 +102,11 @@ class ProductQuantizer(LatentQuantizer):
             # Fit K-Means
             kmeans = KMeans(n_clusters=self.num_centroids, n_init=3, random_state=42)
             kmeans.fit(sub_embeddings)
-            new_codebooks[m] = torch.tensor(kmeans.cluster_centers_, dtype=torch.float32)
+            new_codebooks[m] = torch.tensor(
+                kmeans.cluster_centers_,
+                dtype=torch.float32,
+                device=self.codebooks.device,
+            )
 
         self.codebooks.copy_(new_codebooks)
         self.is_fitted = True
