@@ -99,7 +99,7 @@ class MedicalGradCAM:
         target_score.backward(retain_graph=True)
 
         if self.activations is None or self.gradients is None:
-            logger.error("Failed to capture activations or gradients. Returning dummy heatmap.")
+            logger.warning("GradCAM could not capture activations or gradients. Returning blank heatmap.")
             # Return blank heatmap matching spatial size of input
             spatial_dims = input_tensor.shape[2:]
             return torch.zeros(spatial_dims)
@@ -132,10 +132,24 @@ class MedicalGradCAM:
                     H = W = int(np.sqrt(N))
                     if H * W == N:
                         cam = cam.view(H, W)
+                    else:
+                        cam = cam.unsqueeze(0)
             else:
+                activations = self.activations
+                gradients = self.gradients
+
+                # Swin/timm features can be channels-last: (B, H, W, C).
+                if (
+                    len(activations.shape) == 4
+                    and activations.shape[-1] > activations.shape[1]
+                    and activations.shape[-1] > activations.shape[2]
+                ):
+                    activations = activations.permute(0, 3, 1, 2)
+                    gradients = gradients.permute(0, 3, 1, 2)
+
                 # Standard Conv2D activations: (B, C, H, W)
-                weights = torch.mean(self.gradients, dim=[2, 3], keepdim=True)  # (B, C, 1, 1)
-                cam = torch.sum(weights * self.activations, dim=1).squeeze(0)  # (H, W)
+                weights = torch.mean(gradients, dim=[2, 3], keepdim=True)  # (B, C, 1, 1)
+                cam = torch.sum(weights * activations, dim=1).squeeze(0)  # (H, W)
 
         # Relu on CAM: only positive influence matters
         cam = F.relu(cam)

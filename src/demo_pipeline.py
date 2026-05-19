@@ -9,16 +9,42 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent))
 
 import torch
+from torch import nn
 from torch.utils.data import DataLoader
 
 from medical_vlm_pipeline import PipelineConfig, MedicalVLMPipeline
 from medical_vlm_pipeline.data import MedicalCase, MedicalCaseDataset
 from medical_vlm_pipeline.alignment import infonce_loss
 from medical_vlm_pipeline.explainability import retrieval_explanation, MedicalGradCAM
+from medical_vlm_pipeline.quantization import IdentityQuantizer
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def select_gradcam_target_layer(model: MedicalVLMPipeline) -> tuple[str, nn.Module] | None:
+    """Select a GradCAM-compatible target layer from the active image encoder."""
+    image_encoder = model.image_encoder
+
+    if hasattr(image_encoder, "fallback_cnn"):
+        for idx in reversed(range(len(image_encoder.fallback_cnn))):
+            layer = image_encoder.fallback_cnn[idx]
+            if isinstance(layer, nn.Conv2d):
+                return f"image_encoder.fallback_cnn.{idx}", layer
+
+    backbone = getattr(image_encoder, "backbone", None)
+    if backbone is not None:
+        preferred_suffixes = ("norm2", "norm1", "norm", "bn2", "bn1")
+        for name, layer in reversed(list(backbone.named_modules())):
+            if isinstance(layer, (nn.LayerNorm, nn.BatchNorm2d)) and name.endswith(preferred_suffixes):
+                return f"image_encoder.backbone.{name}", layer
+
+        for name, layer in reversed(list(backbone.named_modules())):
+            if isinstance(layer, nn.Conv2d):
+                return f"image_encoder.backbone.{name}", layer
+
+    return None
 
 
 def generate_synthetic_data(temp_dir: Path) -> tuple[list[MedicalCase], MedicalCase]:
@@ -173,16 +199,21 @@ def main() -> None:
 
     # 9. Explainability Hook Validation (Stage 9 GradCAM)
     logger.info("Running Visual Explainability Hook (GradCAM) on Image Encoder...")
-    # Target final convolution layer in fallback baseline (or Swin if available)
-    if hasattr(pipeline.image_encoder, "fallback_cnn"):
-        target_layer = pipeline.image_encoder.fallback_cnn[7]  # Conv2d block
+    selected_layer = select_gradcam_target_layer(pipeline)
+    if selected_layer is not None:
+        target_layer_name, target_layer = selected_layer
+        logger.info(f"Selected GradCAM target layer: {target_layer_name}")
+        original_quantizer = pipeline.quantizer
+        pipeline.quantizer = IdentityQuantizer()
         gradcam = MedicalGradCAM(pipeline, target_layer)
-
-        heatmap = gradcam.generate_heatmap(query_image, class_idx=1)
-        logger.info(f"GradCAM Heatmap Generated Successfully. Output Tensor Shape: {heatmap.shape}")
-        gradcam.remove_hooks()
+        try:
+            heatmap = gradcam.generate_heatmap(query_image, class_idx=1)
+            logger.info(f"GradCAM Heatmap Generated Successfully. Output Tensor Shape: {heatmap.shape}")
+        finally:
+            gradcam.remove_hooks()
+            pipeline.quantizer = original_quantizer
     else:
-        logger.info("Custom target layer not found for GradCAM in image encoder backbone.")
+        logger.info("GradCAM skipped: no spatial target layer found in the active image encoder.")
 
     logger.info("=" * 60)
     logger.info("PIPELINE DEMONSTRATION RUN COMPLETED SUCCESSFULLY!")
