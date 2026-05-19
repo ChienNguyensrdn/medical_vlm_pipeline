@@ -186,6 +186,51 @@ def retrieval_results_to_dict(results: list[Any]) -> list[dict[str, Any]]:
     ]
 
 
+def write_case_index(path: Path, cases: list[MedicalCase]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, mode="w", newline="", encoding="utf-8") as f:
+        fieldnames = ["case_id", "image_path", "label", "modality", "report_text"]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for case in cases:
+            writer.writerow({
+                "case_id": case.case_id,
+                "image_path": str(case.image_path),
+                "label": case.label,
+                "modality": case.modality,
+                "report_text": case.report_text,
+            })
+
+
+def save_training_checkpoint(
+    path: Path,
+    pipeline: MedicalVLMPipeline,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    epoch: int,
+    best_loss: float,
+    config: PipelineConfig,
+    class_names: list[str],
+    label_to_idx: dict[str, int],
+    epoch_records: list[dict[str, Any]],
+    dataset_source: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint = {
+        "epoch": epoch,
+        "best_loss": best_loss,
+        "model_state_dict": pipeline.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "config": to_jsonable(asdict(config)),
+        "class_names": class_names,
+        "label_to_idx": label_to_idx,
+        "epoch_records": to_jsonable(epoch_records),
+        "dataset_source": dataset_source,
+    }
+    torch.save(checkpoint, path)
+
+
 def calculate_lcs(x: list[str], y: list[str]) -> int:
     """Find length of Longest Common Subsequence between two token sequences."""
     m, n = len(x), len(y)
@@ -334,6 +379,8 @@ def main():
     # Initialize metrics folder and durable run metadata early.
     metrics_dir = Path("report_kaggle")
     metrics_dir.mkdir(exist_ok=True)
+    model_artifacts_dir = metrics_dir / "model_artifacts"
+    model_artifacts_dir.mkdir(parents=True, exist_ok=True)
     run_started_at = time.strftime("%Y-%m-%d %H:%M:%S")
     run_timer_start = time.perf_counter()
 
@@ -379,6 +426,7 @@ def main():
             "environment": environment_snapshot(device),
         },
     )
+    write_case_index(metrics_dir / "case_index.csv", train_cases)
 
     # 3. Instantiate Tokenizer & Wrapper
     # Use fallback Bidirectional LSTM or HuggingFace Tokenizer
@@ -439,6 +487,14 @@ def main():
 
     epoch_records: list[dict[str, Any]] = []
     label_to_idx = {name: idx for idx, name in enumerate(class_names)}
+    write_json(
+        model_artifacts_dir / "label_map.json",
+        {
+            "class_names": class_names,
+            "label_to_idx": label_to_idx,
+            "idx_to_label": {idx: label for label, idx in label_to_idx.items()},
+        },
+    )
 
     for epoch in range(1, epochs + 1):
         epoch_start = time.perf_counter()
@@ -656,6 +712,20 @@ def main():
             best_loss = avg_loss
             checkpoint_path = Path("best_model.pt")
             torch.save(pipeline.state_dict(), checkpoint_path)
+            torch.save(pipeline.state_dict(), model_artifacts_dir / "best_model_state_dict.pt")
+            save_training_checkpoint(
+                model_artifacts_dir / "best_training_checkpoint.pt",
+                pipeline=pipeline,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                epoch=epoch,
+                best_loss=best_loss,
+                config=config,
+                class_names=class_names,
+                label_to_idx=label_to_idx,
+                epoch_records=epoch_records,
+                dataset_source=dataset_source,
+            )
             logger.info(f"New best model saved successfully to: {checkpoint_path}")
 
     # 7. Post-Training Index Generation
@@ -670,6 +740,50 @@ def main():
 
     # Rebuild optimized Quantized index
     pipeline.build_vector_index(train_loader)
+    retriever_index_base = model_artifacts_dir / "retriever_index" / "faiss_retriever"
+    pipeline.retriever.save(retriever_index_base)
+    torch.save(pipeline.state_dict(), model_artifacts_dir / "final_model_state_dict.pt")
+    save_training_checkpoint(
+        model_artifacts_dir / "final_training_checkpoint.pt",
+        pipeline=pipeline,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        epoch=epochs,
+        best_loss=best_loss,
+        config=config,
+        class_names=class_names,
+        label_to_idx=label_to_idx,
+        epoch_records=epoch_records,
+        dataset_source=dataset_source,
+    )
+    write_json(
+        model_artifacts_dir / "model_metadata.json",
+        {
+            "model_name": "Quantized Retrieval-Augmented Medical VLM",
+            "config": asdict(config),
+            "class_names": class_names,
+            "label_to_idx": label_to_idx,
+            "dataset_source": dataset_source,
+            "num_train_cases": len(train_cases),
+            "best_loss": best_loss,
+            "artifacts": {
+                "root_best_model_state_dict": str(Path("best_model.pt")),
+                "best_model_state_dict": str(model_artifacts_dir / "best_model_state_dict.pt"),
+                "final_model_state_dict": str(model_artifacts_dir / "final_model_state_dict.pt"),
+                "best_training_checkpoint": str(model_artifacts_dir / "best_training_checkpoint.pt"),
+                "final_training_checkpoint": str(model_artifacts_dir / "final_training_checkpoint.pt"),
+                "retriever_index_base": str(retriever_index_base),
+                "label_map": str(model_artifacts_dir / "label_map.json"),
+                "case_index": str(metrics_dir / "case_index.csv"),
+            },
+            "reload_notes": [
+                "Instantiate PipelineConfig and MedicalVLMPipeline with the saved class_names.",
+                "Load model weights from best_model_state_dict.pt or final_model_state_dict.pt.",
+                "Load retriever using pipeline.retriever.load(Path('retriever_index/faiss_retriever')).",
+                "Use final_training_checkpoint.pt to resume optimizer/scheduler state.",
+            ],
+        },
+    )
 
     # 8. Evaluate Text Generation NLP Metrics (BLEU and ROUGE-L)
     logger.info("Evaluating text generation performance across reference database...")
@@ -807,6 +921,14 @@ def main():
         "device": str(device),
         "artifacts": {
             "checkpoint": str(Path("best_model.pt")),
+            "best_model_state_dict": str(model_artifacts_dir / "best_model_state_dict.pt"),
+            "final_model_state_dict": str(model_artifacts_dir / "final_model_state_dict.pt"),
+            "best_training_checkpoint": str(model_artifacts_dir / "best_training_checkpoint.pt"),
+            "final_training_checkpoint": str(model_artifacts_dir / "final_training_checkpoint.pt"),
+            "retriever_index_base": str(retriever_index_base),
+            "model_metadata": str(model_artifacts_dir / "model_metadata.json"),
+            "label_map": str(model_artifacts_dir / "label_map.json"),
+            "case_index": str(metrics_dir / "case_index.csv"),
             "run_config": str(metrics_dir / "run_config.json"),
             "environment": str(metrics_dir / "environment.json"),
             "training_metrics_csv": str(metrics_file),

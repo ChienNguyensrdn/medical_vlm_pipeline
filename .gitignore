@@ -161,3 +161,10 @@ data/images/
 *.dicom
 *.nii
 *.nii.gz
+
+# Generated Kaggle training outputs
+report_kaggle/model_artifacts/
+report_kaggle/kaggle_train_stdout.log
+report_kaggle/case_index.csv
+medical_vlm_pipeline_artifacts.zip
+*.zip
