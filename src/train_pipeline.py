@@ -242,6 +242,7 @@ def main():
 
     table.add_row("Predicted Label", diag_out.diagnosis)
     table.add_row("Confidence Score", f"{diag_out.confidence * 100:.2f}%")
+    table.add_row("Uncertainty (Entropy)", f"{diag_out.uncertainty:.4f}" if diag_out.uncertainty is not None else "N/A")
     table.add_row("Retrieved Matches", str(len(diag_out.retrieved_cases)))
     table.add_row("Generated Report", diag_out.report)
 

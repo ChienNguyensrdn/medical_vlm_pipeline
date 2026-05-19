@@ -134,6 +134,7 @@ def main() -> None:
     logger.info(f"Query Case ID:      {query_case.case_id}")
     logger.info(f"Predicted Diagnosis: {diagnosis_output.diagnosis}")
     logger.info(f"Confidence Score:    {diagnosis_output.confidence * 100:.2f}%")
+    logger.info(f"Uncertainty (Entropy): {diagnosis_output.uncertainty:.4f}" if diagnosis_output.uncertainty is not None else "Uncertainty: N/A")
     logger.info("-" * 60)
 
     logger.info(f"Retrieved Similar Precedent Cases:")

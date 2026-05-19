@@ -27,6 +27,7 @@ class DiagnosisOutput:
     report: str | None = None
     latent_embedding: Tensor | None = None
     quantized_embedding: Tensor | None = None
+    uncertainty: float | None = None
 
 
 class MedicalVLMPipeline(nn.Module):
@@ -176,12 +177,19 @@ class MedicalVLMPipeline(nn.Module):
             # 3. Vector Database Retrieval (similar cases)
             retrieved = self.retriever.search(query_embedding, top_k=self.config.retrieval.top_k)
 
-            # 4. Diagnose Head prediction
-            logits = self.diagnosis_head(query_embedding)
-            probabilities = F.softmax(logits, dim=-1)
-            conf, pred_idx = torch.max(probabilities, dim=-1)
+            # 4. Diagnose Head prediction with epistemic uncertainty estimation via MC Dropout
+            if hasattr(self.diagnosis_head, "predict_with_uncertainty"):
+                mc_res = self.diagnosis_head.predict_with_uncertainty(query_embedding, num_samples=20)
+                pred_idx = mc_res["predicted_class"][0]
+                confidence = float(mc_res["confidence"][0].item())
+                uncertainty_score = float(mc_res["uncertainty"][0].item())
+            else:
+                logits = self.diagnosis_head(query_embedding)
+                probabilities = F.softmax(logits, dim=-1)
+                conf, pred_idx = torch.max(probabilities, dim=-1)
+                confidence = float(conf.item())
+                uncertainty_score = 0.0
 
-            confidence = float(conf.item())
             diagnosis_label = self.class_names[int(pred_idx.item())]
 
             # 5. Multimodal Report Generation
@@ -197,7 +205,8 @@ class MedicalVLMPipeline(nn.Module):
                 retrieved_cases=retrieved,
                 report=report_out.text,
                 latent_embedding=latent,
-                quantized_embedding=query_embedding
+                quantized_embedding=query_embedding,
+                uncertainty=uncertainty_score
             )
 
     def forward(self, images: Tensor) -> Tensor:
