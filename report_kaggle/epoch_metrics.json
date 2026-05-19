@@ -1,0 +1,51 @@
+{
+  "class_names": [
+    "Frontal",
+    "Lateral"
+  ],
+  "records": [
+    {
+      "epoch": 1,
+      "total_loss": 1.019089549779892,
+      "contrastive_loss": 0.7188960611820221,
+      "classification_loss": 0.6596414893865585,
+      "accuracy": 0.5,
+      "precision": 0.25,
+      "recall": 0.5,
+      "f1_score": 0.3333333333333333,
+      "learning_rate_start": 0.0001,
+      "learning_rate": 0.0,
+      "epoch_duration_sec": 0.9507433749968186,
+      "num_batches": 2,
+      "num_train_samples": 4,
+      "batch_size": 2,
+      "device": "cpu",
+      "is_best": true,
+      "best_loss_before_epoch": Infinity,
+      "per_class_metrics": {
+        "Frontal": {
+          "precision": 0.5,
+          "recall": 1.0,
+          "f1_score": 0.6666666666666666,
+          "support": 2
+        },
+        "Lateral": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1_score": 0.0,
+          "support": 2
+        }
+      },
+      "confusion_matrix": [
+        [
+          2,
+          0
+        ],
+        [
+          2,
+          0
+        ]
+      ]
+    }
+  ]
+}

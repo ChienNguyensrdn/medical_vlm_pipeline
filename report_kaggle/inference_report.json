@@ -1,0 +1,72 @@
+{
+  "case_id": "SYN-CXR-1000",
+  "label": "Frontal",
+  "diagnosis": "Frontal",
+  "confidence": 0.7018080949783325,
+  "uncertainty": 0.6093245148658752,
+  "generated_report": "Obesity in the right lower lobe, highly suggestive of lobar pneumonia.",
+  "retrieved_cases": [
+    {
+      "case_id": "SYN-CXR-1000",
+      "score": 1.0,
+      "label": "Frontal",
+      "report_text": "Normal chest X-ray. The lungs are clear. Cardiomediastinal silhouette is normal."
+    },
+    {
+      "case_id": "SYN-CXR-1002",
+      "score": 1.0,
+      "label": "Frontal",
+      "report_text": "Increased opacity in the right lower lobe, highly suggestive of lobar pneumonia."
+    },
+    {
+      "case_id": "SYN-CXR-1001",
+      "score": 1.0,
+      "label": "Lateral",
+      "report_text": "Mild cardiomegaly is present. Prominence of the pulmonary vasculature suggests mild congestion."
+    },
+    {
+      "case_id": "SYN-CXR-1003",
+      "score": 1.0,
+      "label": "Lateral",
+      "report_text": "Bilateral pleural effusions with bibasilar atelectasis, worse on the left side."
+    }
+  ],
+  "step_metrics": {
+    "image_encoder": {
+      "latency_ms": 1.6349999932572246,
+      "latent_shape": [
+        1,
+        256
+      ],
+      "l2_norm": 1.0
+    },
+    "quantizer": {
+      "latency_ms": 0.167582998983562,
+      "reconstruction_mse": 0.4019008278846741,
+      "quantizer_type": "ProductQuantizer"
+    },
+    "retriever": {
+      "latency_ms": 0.060624966863542795,
+      "num_retrieved": 4,
+      "similarity_scores": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "mean_similarity_score": 1.0
+    },
+    "diagnosis_head": {
+      "latency_ms": 0.3368339966982603,
+      "confidence": 0.7018080949783325,
+      "uncertainty_entropy": 0.6093245148658752,
+      "predicted_label": "Frontal"
+    },
+    "report_generator": {
+      "latency_ms": 238.54787502205,
+      "report_length_chars": 70,
+      "repetition_fallback_triggered": false,
+      "tokens_generated": 11
+    }
+  }
+}

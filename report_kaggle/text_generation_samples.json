@@ -1,0 +1,316 @@
+{
+  "samples": [
+    {
+      "sample_index": 0,
+      "case_id": "SYN-CXR-1000",
+      "label": "Frontal",
+      "modality": "Chest X-ray",
+      "reference_report": "Normal chest X-ray. The lungs are clear. Cardiomediastinal silhouette is normal.",
+      "generated_report": "Obesity in the right lower lobe, highly suggestive of lobar pneumonia.",
+      "bleu_1": 0.0909090909090909,
+      "bleu_4": 0.018850319022747353,
+      "rouge_l": 0.09090909090909091,
+      "predicted_diagnosis": "Frontal",
+      "confidence": 0.6458706855773926,
+      "uncertainty": 0.6499654054641724,
+      "retrieved_cases": [
+        {
+          "case_id": "SYN-CXR-1000",
+          "score": 1.0,
+          "label": "Frontal",
+          "report_text": "Normal chest X-ray. The lungs are clear. Cardiomediastinal silhouette is normal."
+        },
+        {
+          "case_id": "SYN-CXR-1002",
+          "score": 1.0,
+          "label": "Frontal",
+          "report_text": "Increased opacity in the right lower lobe, highly suggestive of lobar pneumonia."
+        },
+        {
+          "case_id": "SYN-CXR-1001",
+          "score": 1.0,
+          "label": "Lateral",
+          "report_text": "Mild cardiomegaly is present. Prominence of the pulmonary vasculature suggests mild congestion."
+        },
+        {
+          "case_id": "SYN-CXR-1003",
+          "score": 1.0,
+          "label": "Lateral",
+          "report_text": "Bilateral pleural effusions with bibasilar atelectasis, worse on the left side."
+        }
+      ],
+      "step_metrics": {
+        "image_encoder": {
+          "latency_ms": 1.6005420475266874,
+          "latent_shape": [
+            1,
+            256
+          ],
+          "l2_norm": 0.9999999403953552
+        },
+        "quantizer": {
+          "latency_ms": 0.1960420049726963,
+          "reconstruction_mse": 0.40195903182029724,
+          "quantizer_type": "ProductQuantizer"
+        },
+        "retriever": {
+          "latency_ms": 2.5237920344807208,
+          "num_retrieved": 4,
+          "similarity_scores": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "mean_similarity_score": 1.0
+        },
+        "diagnosis_head": {
+          "latency_ms": 1.4930840115994215,
+          "confidence": 0.6458706855773926,
+          "uncertainty_entropy": 0.6499654054641724,
+          "predicted_label": "Frontal"
+        },
+        "report_generator": {
+          "latency_ms": 546.638542029541,
+          "report_length_chars": 70,
+          "repetition_fallback_triggered": false,
+          "tokens_generated": 11
+        }
+      }
+    },
+    {
+      "sample_index": 1,
+      "case_id": "SYN-CXR-1001",
+      "label": "Lateral",
+      "modality": "Chest X-ray",
+      "reference_report": "Mild cardiomegaly is present. Prominence of the pulmonary vasculature suggests mild congestion.",
+      "generated_report": "Obesity in the right lower lobe, highly suggestive of lobar pneumonia.",
+      "bleu_1": 0.16601831205132045,
+      "bleu_4": 0.0204689180374571,
+      "rouge_l": 0.08695652173913043,
+      "predicted_diagnosis": "Frontal",
+      "confidence": 0.7040101289749146,
+      "uncertainty": 0.6074281334877014,
+      "retrieved_cases": [
+        {
+          "case_id": "SYN-CXR-1000",
+          "score": 1.0,
+          "label": "Frontal",
+          "report_text": "Normal chest X-ray. The lungs are clear. Cardiomediastinal silhouette is normal."
+        },
+        {
+          "case_id": "SYN-CXR-1002",
+          "score": 1.0,
+          "label": "Frontal",
+          "report_text": "Increased opacity in the right lower lobe, highly suggestive of lobar pneumonia."
+        },
+        {
+          "case_id": "SYN-CXR-1001",
+          "score": 1.0,
+          "label": "Lateral",
+          "report_text": "Mild cardiomegaly is present. Prominence of the pulmonary vasculature suggests mild congestion."
+        },
+        {
+          "case_id": "SYN-CXR-1003",
+          "score": 1.0,
+          "label": "Lateral",
+          "report_text": "Bilateral pleural effusions with bibasilar atelectasis, worse on the left side."
+        }
+      ],
+      "step_metrics": {
+        "image_encoder": {
+          "latency_ms": 2.6002919767051935,
+          "latent_shape": [
+            1,
+            256
+          ],
+          "l2_norm": 0.9999999403953552
+        },
+        "quantizer": {
+          "latency_ms": 0.2049580216407776,
+          "reconstruction_mse": 0.40187200903892517,
+          "quantizer_type": "ProductQuantizer"
+        },
+        "retriever": {
+          "latency_ms": 0.06483303150162101,
+          "num_retrieved": 4,
+          "similarity_scores": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "mean_similarity_score": 1.0
+        },
+        "diagnosis_head": {
+          "latency_ms": 0.2966249594464898,
+          "confidence": 0.7040101289749146,
+          "uncertainty_entropy": 0.6074281334877014,
+          "predicted_label": "Frontal"
+        },
+        "report_generator": {
+          "latency_ms": 238.14166599186137,
+          "report_length_chars": 70,
+          "repetition_fallback_triggered": false,
+          "tokens_generated": 11
+        }
+      }
+    },
+    {
+      "sample_index": 2,
+      "case_id": "SYN-CXR-1002",
+      "label": "Frontal",
+      "modality": "Chest X-ray",
+      "reference_report": "Increased opacity in the right lower lobe, highly suggestive of lobar pneumonia.",
+      "generated_report": "Obesity in the right lower lobe, highly suggestive of lobar pneumonia.",
+      "bleu_1": 0.8300915602566021,
+      "bleu_4": 0.8155395405382073,
+      "rouge_l": 0.8695652173913043,
+      "predicted_diagnosis": "Frontal",
+      "confidence": 0.6770786046981812,
+      "uncertainty": 0.629051923751831,
+      "retrieved_cases": [
+        {
+          "case_id": "SYN-CXR-1000",
+          "score": 1.0,
+          "label": "Frontal",
+          "report_text": "Normal chest X-ray. The lungs are clear. Cardiomediastinal silhouette is normal."
+        },
+        {
+          "case_id": "SYN-CXR-1002",
+          "score": 1.0,
+          "label": "Frontal",
+          "report_text": "Increased opacity in the right lower lobe, highly suggestive of lobar pneumonia."
+        },
+        {
+          "case_id": "SYN-CXR-1001",
+          "score": 1.0,
+          "label": "Lateral",
+          "report_text": "Mild cardiomegaly is present. Prominence of the pulmonary vasculature suggests mild congestion."
+        },
+        {
+          "case_id": "SYN-CXR-1003",
+          "score": 1.0,
+          "label": "Lateral",
+          "report_text": "Bilateral pleural effusions with bibasilar atelectasis, worse on the left side."
+        }
+      ],
+      "step_metrics": {
+        "image_encoder": {
+          "latency_ms": 1.880790980067104,
+          "latent_shape": [
+            1,
+            256
+          ],
+          "l2_norm": 1.0
+        },
+        "quantizer": {
+          "latency_ms": 0.19033299759030342,
+          "reconstruction_mse": 0.4019331634044647,
+          "quantizer_type": "ProductQuantizer"
+        },
+        "retriever": {
+          "latency_ms": 0.0694170012138784,
+          "num_retrieved": 4,
+          "similarity_scores": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "mean_similarity_score": 1.0
+        },
+        "diagnosis_head": {
+          "latency_ms": 0.3284589620307088,
+          "confidence": 0.6770786046981812,
+          "uncertainty_entropy": 0.629051923751831,
+          "predicted_label": "Frontal"
+        },
+        "report_generator": {
+          "latency_ms": 237.28200001642108,
+          "report_length_chars": 70,
+          "repetition_fallback_triggered": false,
+          "tokens_generated": 11
+        }
+      }
+    },
+    {
+      "sample_index": 3,
+      "case_id": "SYN-CXR-1003",
+      "label": "Lateral",
+      "modality": "Chest X-ray",
+      "reference_report": "Bilateral pleural effusions with bibasilar atelectasis, worse on the left side.",
+      "generated_report": "Obesity in the right lower lobe, highly suggestive of lobar pneumonia.",
+      "bleu_1": 0.0909090909090909,
+      "bleu_4": 0.018850319022747353,
+      "rouge_l": 0.09090909090909091,
+      "predicted_diagnosis": "Frontal",
+      "confidence": 0.6829262971878052,
+      "uncertainty": 0.6246439218521118,
+      "retrieved_cases": [
+        {
+          "case_id": "SYN-CXR-1000",
+          "score": 1.0,
+          "label": "Frontal",
+          "report_text": "Normal chest X-ray. The lungs are clear. Cardiomediastinal silhouette is normal."
+        },
+        {
+          "case_id": "SYN-CXR-1002",
+          "score": 1.0,
+          "label": "Frontal",
+          "report_text": "Increased opacity in the right lower lobe, highly suggestive of lobar pneumonia."
+        },
+        {
+          "case_id": "SYN-CXR-1001",
+          "score": 1.0,
+          "label": "Lateral",
+          "report_text": "Mild cardiomegaly is present. Prominence of the pulmonary vasculature suggests mild congestion."
+        },
+        {
+          "case_id": "SYN-CXR-1003",
+          "score": 1.0,
+          "label": "Lateral",
+          "report_text": "Bilateral pleural effusions with bibasilar atelectasis, worse on the left side."
+        }
+      ],
+      "step_metrics": {
+        "image_encoder": {
+          "latency_ms": 1.4842500095255673,
+          "latent_shape": [
+            1,
+            256
+          ],
+          "l2_norm": 0.9999999403953552
+        },
+        "quantizer": {
+          "latency_ms": 0.16112503362819552,
+          "reconstruction_mse": 0.40177416801452637,
+          "quantizer_type": "ProductQuantizer"
+        },
+        "retriever": {
+          "latency_ms": 0.053292023949325085,
+          "num_retrieved": 4,
+          "similarity_scores": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "mean_similarity_score": 1.0
+        },
+        "diagnosis_head": {
+          "latency_ms": 0.28249999741092324,
+          "confidence": 0.6829262971878052,
+          "uncertainty_entropy": 0.6246439218521118,
+          "predicted_label": "Frontal"
+        },
+        "report_generator": {
+          "latency_ms": 235.03550002351403,
+          "report_length_chars": 70,
+          "repetition_fallback_triggered": false,
+          "tokens_generated": 11
+        }
+      }
+    }
+  ]
+}

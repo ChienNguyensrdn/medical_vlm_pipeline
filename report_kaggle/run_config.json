@@ -1,0 +1,79 @@
+{
+  "run_started_at": "2026-05-19 13:37:24",
+  "argv": [
+    "src/train_pipeline.py",
+    "--epochs",
+    "1",
+    "--batch-size",
+    "2",
+    "--synthetic-cases",
+    "4",
+    "--device",
+    "auto",
+    "--skip-plot"
+  ],
+  "args": {
+    "epochs": 1,
+    "batch_size": 2,
+    "device": "auto",
+    "dataset_dir": "/kaggle/input/iu-chest-x-rays-cleaned",
+    "synthetic_cases": 4,
+    "skip_plot": true
+  },
+  "config": {
+    "data": {
+      "image_root": "data/images",
+      "report_path": "data/reports.csv",
+      "modality": "MRI",
+      "image_size": 224,
+      "volume_depth": null
+    },
+    "encoders": {
+      "image_encoder": "swin_tiny_patch4_window7_224",
+      "text_encoder": "microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext",
+      "embedding_dim": 768,
+      "projection_dim": 256
+    },
+    "retrieval": {
+      "engine": "faiss",
+      "index_path": "artifacts/faiss.index",
+      "top_k": 5,
+      "quantized": true
+    },
+    "training": {
+      "batch_size": 2,
+      "epochs": 1,
+      "learning_rate": 0.0001,
+      "temperature": 0.07
+    }
+  },
+  "dataset": {
+    "source": "synthetic",
+    "dataset_dir": "/kaggle/input/iu-chest-x-rays-cleaned",
+    "csv_path": "/kaggle/input/iu-chest-x-rays-cleaned/cleaned_dataset.csv",
+    "images_dir": "/kaggle/input/iu-chest-x-rays-cleaned/resized_images/256",
+    "num_cases": 4,
+    "label_counts": {
+      "Frontal": 2,
+      "Lateral": 2
+    },
+    "modality_counts": {
+      "Chest X-ray": 4
+    },
+    "sample_case_ids": [
+      "SYN-CXR-1000",
+      "SYN-CXR-1001",
+      "SYN-CXR-1002",
+      "SYN-CXR-1003"
+    ]
+  },
+  "environment": {
+    "python": "3.11.13",
+    "platform": "macOS-26.3.1-arm64-arm-64bit",
+    "torch": "2.12.0",
+    "device": "cpu",
+    "cuda_available": false,
+    "cuda_version": null,
+    "mps_available": false
+  }
+}

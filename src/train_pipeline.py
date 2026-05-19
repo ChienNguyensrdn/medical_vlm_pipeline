@@ -5,7 +5,13 @@ import os
 import sys
 import logging
 import argparse
+import csv
+import json
+import platform
+import time
+from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
@@ -81,6 +87,67 @@ def select_device(requested_device: str = "auto") -> torch.device:
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def to_jsonable(value: Any) -> Any:
+    """Convert nested training objects into JSON-safe values."""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 1:
+            return value.detach().cpu().item()
+        return value.detach().cpu().tolist()
+    if isinstance(value, dict):
+        return {str(k): to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [to_jsonable(v) for v in value]
+    if hasattr(value, "__dict__") and not isinstance(value, type):
+        return to_jsonable(vars(value))
+    return value
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(to_jsonable(payload), f, indent=2, ensure_ascii=False)
+
+
+def count_values(values: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        key = value or "unknown"
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def environment_snapshot(device: torch.device) -> dict[str, Any]:
+    snapshot = {
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "torch": torch.__version__,
+        "device": str(device),
+        "cuda_available": torch.cuda.is_available(),
+        "cuda_version": torch.version.cuda,
+        "mps_available": hasattr(torch.backends, "mps") and torch.backends.mps.is_available(),
+    }
+    if torch.cuda.is_available():
+        snapshot["cuda_device_count"] = torch.cuda.device_count()
+        snapshot["cuda_devices"] = [
+            torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())
+        ]
+    return snapshot
+
+
+def retrieval_results_to_dict(results: list[Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "case_id": item.case_id,
+            "score": item.score,
+            "label": item.label,
+            "report_text": item.report_text,
+        }
+        for item in results
+    ]
 
 
 def calculate_lcs(x: list[str], y: list[str]) -> int:
@@ -228,6 +295,12 @@ def main():
     if args.device == "mps" and device.type != "mps":
         logger.warning("Apple MPS was requested but is not available in this Python/PyTorch environment.")
 
+    # Initialize metrics folder and durable run metadata early.
+    metrics_dir = Path("report_kaggle")
+    metrics_dir.mkdir(exist_ok=True)
+    run_started_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    run_timer_start = time.perf_counter()
+
     # Define actual dataset paths
     dataset_dir = args.dataset_dir
     csv_path = os.path.join(dataset_dir, "cleaned_dataset.csv")
@@ -237,15 +310,39 @@ def main():
     if os.path.exists(csv_path):
         logger.info(f"Connected to IU Chest X-rays dataset on Kaggle at: {csv_path}")
         train_cases = load_iu_chest_xray_cases(csv_path, images_dir)
+        dataset_source = "real"
     else:
         logger.warning(
             f"Dataset CSV not found at: {csv_path}. Falling back to high-quality synthetic dry-run."
         )
         train_cases = generate_synthetic_cases(num_cases=args.synthetic_cases)
+        dataset_source = "synthetic"
 
     if not train_cases:
         logger.error("No training cases loaded. Exiting.")
         sys.exit(1)
+
+    write_json(metrics_dir / "environment.json", environment_snapshot(device))
+    write_json(
+        metrics_dir / "run_config.json",
+        {
+            "run_started_at": run_started_at,
+            "argv": sys.argv,
+            "args": vars(args),
+            "config": asdict(config),
+            "dataset": {
+                "source": dataset_source,
+                "dataset_dir": dataset_dir,
+                "csv_path": csv_path,
+                "images_dir": images_dir,
+                "num_cases": len(train_cases),
+                "label_counts": count_values([case.label or "" for case in train_cases]),
+                "modality_counts": count_values([case.modality or "" for case in train_cases]),
+                "sample_case_ids": [case.case_id for case in train_cases[:10]],
+            },
+            "environment": environment_snapshot(device),
+        },
+    )
 
     # 3. Instantiate Tokenizer & Wrapper
     # Use fallback Bidirectional LSTM or HuggingFace Tokenizer
@@ -297,16 +394,19 @@ def main():
     epochs = config.training.epochs
     best_loss = float("inf")
     
-    # Initialize metrics folder and CSV logging
-    metrics_dir = Path("report_kaggle")
-    metrics_dir.mkdir(exist_ok=True)
+    # Initialize metrics CSV logging
     metrics_file = metrics_dir / "training_metrics.csv"
     if metrics_file.exists():
         metrics_file.unlink()
         
     logger.info(f"Starting Joint Contrastive-Classification Training for {epochs} Epochs...")
 
+    epoch_records: list[dict[str, Any]] = []
+    label_to_idx = {name: idx for idx, name in enumerate(class_names)}
+
     for epoch in range(1, epochs + 1):
+        epoch_start = time.perf_counter()
+        learning_rate_start = optimizer.param_groups[0]["lr"]
         pipeline.train()
         epoch_loss = 0.0
         epoch_contrastive = 0.0
@@ -324,7 +424,6 @@ def main():
             labels = batch["label"]
 
             # Map text label string to index tensor
-            label_to_idx = {name: idx for idx, name in enumerate(class_names)}
             label_idxs = torch.tensor(
                 [label_to_idx.get(lbl, 0) for lbl in labels], dtype=torch.long, device=device
             )
@@ -363,8 +462,6 @@ def main():
                 {"Loss": f"{total_loss.item():.4f}", "Class": f"{classification_loss.item():.4f}"}
             )
 
-        scheduler.step()
-
         # Average metrics
         num_batches = len(train_loader)
         avg_loss = epoch_loss / num_batches
@@ -388,23 +485,95 @@ def main():
                 all_targets.extend(label_idxs.cpu().numpy())
 
         # Calculate Accuracy, Precision, Recall, F1-Score
+        per_class_metrics: dict[str, dict[str, float]] = {}
+        confusion_matrix_data: list[list[int]] = []
         try:
-            from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+            from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_fscore_support
             accuracy = float(accuracy_score(all_targets, all_preds))
             precision, recall, f1, _ = precision_recall_fscore_support(all_targets, all_preds, average="weighted", zero_division=0)
             precision, recall, f1 = float(precision), float(recall), float(f1)
+            class_precision, class_recall, class_f1, class_support = precision_recall_fscore_support(
+                all_targets,
+                all_preds,
+                labels=list(range(num_classes)),
+                average=None,
+                zero_division=0,
+            )
+            confusion_matrix_data = confusion_matrix(
+                all_targets,
+                all_preds,
+                labels=list(range(num_classes)),
+            ).tolist()
+            for idx, class_name in enumerate(class_names):
+                per_class_metrics[class_name] = {
+                    "precision": float(class_precision[idx]),
+                    "recall": float(class_recall[idx]),
+                    "f1_score": float(class_f1[idx]),
+                    "support": int(class_support[idx]),
+                }
         except ImportError:
             correct = sum(1 for p, t in zip(all_preds, all_targets) if p == t)
             accuracy = correct / len(all_targets) if len(all_targets) > 0 else 0.0
             precision, recall, f1 = accuracy, accuracy, accuracy
 
+        scheduler.step()
+        learning_rate_end = optimizer.param_groups[0]["lr"]
+        epoch_duration_sec = time.perf_counter() - epoch_start
+
+        is_best = avg_loss < best_loss
+        epoch_record = {
+            "epoch": epoch,
+            "total_loss": avg_loss,
+            "contrastive_loss": avg_contrastive,
+            "classification_loss": avg_class,
+            "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "f1_score": f1,
+            "learning_rate_start": learning_rate_start,
+            "learning_rate": learning_rate_end,
+            "epoch_duration_sec": epoch_duration_sec,
+            "num_batches": num_batches,
+            "num_train_samples": len(train_dataset),
+            "batch_size": config.training.batch_size,
+            "device": str(device),
+            "is_best": is_best,
+            "best_loss_before_epoch": best_loss,
+            "per_class_metrics": per_class_metrics,
+            "confusion_matrix": confusion_matrix_data,
+        }
+        epoch_records.append(epoch_record)
+
         # Append metrics to CSV for experiment logging
-        import csv
         file_exists = metrics_file.exists()
         with open(metrics_file, mode="a" if file_exists else "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             if not file_exists:
-                writer.writerow(["epoch", "total_loss", "contrastive_loss", "classification_loss", "accuracy", "precision", "recall", "f1_score", "learning_rate"])
+                writer.writerow([
+                    "epoch",
+                    "total_loss",
+                    "contrastive_loss",
+                    "classification_loss",
+                    "accuracy",
+                    "precision",
+                    "recall",
+                    "f1_score",
+                    "learning_rate_start",
+                    "learning_rate",
+                    "epoch_duration_sec",
+                    "num_batches",
+                    "num_train_samples",
+                    "batch_size",
+                    "device",
+                    "is_best",
+                    "best_loss_before_epoch",
+                    *[
+                        f"{class_name}_{metric_name}"
+                        for class_name in class_names
+                        for metric_name in ("precision", "recall", "f1_score", "support")
+                    ],
+                    "confusion_matrix_json",
+                ])
             writer.writerow([
                 epoch,
                 f"{avg_loss:.6f}",
@@ -414,8 +583,30 @@ def main():
                 f"{precision:.6f}",
                 f"{recall:.6f}",
                 f"{f1:.6f}",
-                f"{optimizer.param_groups[0]['lr']:.8f}"
+                f"{learning_rate_start:.8f}",
+                f"{learning_rate_end:.8f}",
+                f"{epoch_duration_sec:.4f}",
+                num_batches,
+                len(train_dataset),
+                config.training.batch_size,
+                str(device),
+                int(is_best),
+                f"{best_loss:.6f}",
+                *[
+                    per_class_metrics.get(class_name, {}).get(metric_name, 0.0)
+                    for class_name in class_names
+                    for metric_name in ("precision", "recall", "f1_score", "support")
+                ],
+                json.dumps(confusion_matrix_data),
             ])
+
+        write_json(
+            metrics_dir / "epoch_metrics.json",
+            {
+                "class_names": class_names,
+                "records": epoch_records,
+            },
+        )
 
         console.print(
             f"[bold green]✓ Epoch {epoch:02d}/{epochs:02d}[/bold green] | "
@@ -425,7 +616,7 @@ def main():
         )
 
         # Save Best Checkpoint
-        if avg_loss < best_loss:
+        if is_best:
             best_loss = avg_loss
             checkpoint_path = Path("best_model.pt")
             torch.save(pipeline.state_dict(), checkpoint_path)
@@ -449,6 +640,7 @@ def main():
     bleu1_scores = []
     bleu4_scores = []
     rouge_l_scores = []
+    generation_samples: list[dict[str, Any]] = []
     
     # We sample up to 10 cases to prevent long CPU generation times
     eval_cases = train_cases[:10]
@@ -465,22 +657,85 @@ def main():
             bleu1_scores.append(b1)
             bleu4_scores.append(b4)
             rouge_l_scores.append(r_l)
+            generation_samples.append({
+                "sample_index": idx,
+                "case_id": case.case_id,
+                "label": case.label,
+                "modality": case.modality,
+                "reference_report": ref_report,
+                "generated_report": cand_report,
+                "bleu_1": b1,
+                "bleu_4": b4,
+                "rouge_l": r_l,
+                "predicted_diagnosis": out.diagnosis,
+                "confidence": out.confidence,
+                "uncertainty": out.uncertainty,
+                "retrieved_cases": retrieval_results_to_dict(out.retrieved_cases),
+                "step_metrics": out.step_metrics or {},
+            })
             
     mean_bleu1 = sum(bleu1_scores) / len(bleu1_scores) if bleu1_scores else 0.0
     mean_bleu4 = sum(bleu4_scores) / len(bleu4_scores) if bleu4_scores else 0.0
     mean_rouge_l = sum(rouge_l_scores) / len(rouge_l_scores) if rouge_l_scores else 0.0
 
     # Save final text generation evaluation metrics to a separate JSON file
-    import json
     text_metrics = {
         "mean_bleu_1": mean_bleu1,
         "mean_bleu_4": mean_bleu4,
         "mean_rouge_l": mean_rouge_l,
-        "num_evaluated_cases": len(eval_cases)
+        "num_evaluated_cases": len(eval_cases),
+        "per_case_bleu_1": bleu1_scores,
+        "per_case_bleu_4": bleu4_scores,
+        "per_case_rouge_l": rouge_l_scores,
     }
     with open(metrics_dir / "text_generation_metrics.json", "w", encoding="utf-8") as f:
         json.dump(text_metrics, f, indent=4)
     logger.info(f"Saved text generation evaluation metrics to {metrics_dir / 'text_generation_metrics.json'}")
+
+    write_json(
+        metrics_dir / "text_generation_samples.json",
+        {
+            "samples": generation_samples,
+        },
+    )
+    text_samples_csv = metrics_dir / "text_generation_samples.csv"
+    with open(text_samples_csv, mode="w", newline="", encoding="utf-8") as f:
+        fieldnames = [
+            "sample_index",
+            "case_id",
+            "label",
+            "predicted_diagnosis",
+            "confidence",
+            "uncertainty",
+            "bleu_1",
+            "bleu_4",
+            "rouge_l",
+            "num_retrieved",
+            "mean_retrieval_score",
+            "reference_report",
+            "generated_report",
+        ]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for sample in generation_samples:
+            retrieved_scores = [item["score"] for item in sample["retrieved_cases"]]
+            writer.writerow({
+                "sample_index": sample["sample_index"],
+                "case_id": sample["case_id"],
+                "label": sample["label"],
+                "predicted_diagnosis": sample["predicted_diagnosis"],
+                "confidence": sample["confidence"],
+                "uncertainty": sample["uncertainty"],
+                "bleu_1": sample["bleu_1"],
+                "bleu_4": sample["bleu_4"],
+                "rouge_l": sample["rouge_l"],
+                "num_retrieved": len(retrieved_scores),
+                "mean_retrieval_score": (
+                    sum(retrieved_scores) / len(retrieved_scores) if retrieved_scores else 0.0
+                ),
+                "reference_report": sample["reference_report"],
+                "generated_report": sample["generated_report"],
+            })
 
     # Generate training curves plot
     if args.skip_plot:
@@ -492,6 +747,51 @@ def main():
     logger.info("Testing post-training RAG clinical diagnosis on query case...")
     query_image = train_dataset[0]["image"].unsqueeze(0).to(device)
     diag_out = pipeline.diagnose(query_image)
+    run_duration_sec = time.perf_counter() - run_timer_start
+
+    inference_report = {
+        "case_id": train_cases[0].case_id,
+        "label": train_cases[0].label,
+        "diagnosis": diag_out.diagnosis,
+        "confidence": diag_out.confidence,
+        "uncertainty": diag_out.uncertainty,
+        "generated_report": diag_out.report,
+        "retrieved_cases": retrieval_results_to_dict(diag_out.retrieved_cases),
+        "step_metrics": diag_out.step_metrics or {},
+    }
+    write_json(metrics_dir / "inference_report.json", inference_report)
+
+    artifacts_manifest = {
+        "run_started_at": run_started_at,
+        "run_finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "run_duration_sec": run_duration_sec,
+        "best_loss": best_loss,
+        "dataset_source": dataset_source,
+        "num_train_cases": len(train_cases),
+        "device": str(device),
+        "artifacts": {
+            "checkpoint": str(Path("best_model.pt")),
+            "run_config": str(metrics_dir / "run_config.json"),
+            "environment": str(metrics_dir / "environment.json"),
+            "training_metrics_csv": str(metrics_file),
+            "epoch_metrics_json": str(metrics_dir / "epoch_metrics.json"),
+            "text_generation_metrics": str(metrics_dir / "text_generation_metrics.json"),
+            "text_generation_samples_json": str(metrics_dir / "text_generation_samples.json"),
+            "text_generation_samples_csv": str(metrics_dir / "text_generation_samples.csv"),
+            "inference_report": str(metrics_dir / "inference_report.json"),
+            "training_curves": str(metrics_dir / "training_curves.png"),
+        },
+    }
+    write_json(metrics_dir / "artifacts_manifest.json", artifacts_manifest)
+    write_json(
+        metrics_dir / "run_summary.json",
+        {
+            **artifacts_manifest,
+            "final_inference": inference_report,
+            "text_generation_metrics": text_metrics,
+            "last_epoch": epoch_records[-1] if epoch_records else None,
+        },
+    )
 
     table = Table(title="Finetuned Diagnosis Inference Report", show_header=True, header_style="bold magenta")
     table.add_column("Property", style="dim", width=25)

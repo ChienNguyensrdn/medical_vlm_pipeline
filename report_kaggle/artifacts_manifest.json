@@ -1,0 +1,21 @@
+{
+  "run_started_at": "2026-05-19 13:37:24",
+  "run_finished_at": "2026-05-19 13:37:32",
+  "run_duration_sec": 8.047040082979947,
+  "best_loss": 1.019089549779892,
+  "dataset_source": "synthetic",
+  "num_train_cases": 4,
+  "device": "cpu",
+  "artifacts": {
+    "checkpoint": "best_model.pt",
+    "run_config": "report_kaggle/run_config.json",
+    "environment": "report_kaggle/environment.json",
+    "training_metrics_csv": "report_kaggle/training_metrics.csv",
+    "epoch_metrics_json": "report_kaggle/epoch_metrics.json",
+    "text_generation_metrics": "report_kaggle/text_generation_metrics.json",
+    "text_generation_samples_json": "report_kaggle/text_generation_samples.json",
+    "text_generation_samples_csv": "report_kaggle/text_generation_samples.csv",
+    "inference_report": "report_kaggle/inference_report.json",
+    "training_curves": "report_kaggle/training_curves.png"
+  }
+}

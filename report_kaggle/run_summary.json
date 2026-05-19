@@ -1,0 +1,160 @@
+{
+  "run_started_at": "2026-05-19 13:37:24",
+  "run_finished_at": "2026-05-19 13:37:32",
+  "run_duration_sec": 8.047040082979947,
+  "best_loss": 1.019089549779892,
+  "dataset_source": "synthetic",
+  "num_train_cases": 4,
+  "device": "cpu",
+  "artifacts": {
+    "checkpoint": "best_model.pt",
+    "run_config": "report_kaggle/run_config.json",
+    "environment": "report_kaggle/environment.json",
+    "training_metrics_csv": "report_kaggle/training_metrics.csv",
+    "epoch_metrics_json": "report_kaggle/epoch_metrics.json",
+    "text_generation_metrics": "report_kaggle/text_generation_metrics.json",
+    "text_generation_samples_json": "report_kaggle/text_generation_samples.json",
+    "text_generation_samples_csv": "report_kaggle/text_generation_samples.csv",
+    "inference_report": "report_kaggle/inference_report.json",
+    "training_curves": "report_kaggle/training_curves.png"
+  },
+  "final_inference": {
+    "case_id": "SYN-CXR-1000",
+    "label": "Frontal",
+    "diagnosis": "Frontal",
+    "confidence": 0.7018080949783325,
+    "uncertainty": 0.6093245148658752,
+    "generated_report": "Obesity in the right lower lobe, highly suggestive of lobar pneumonia.",
+    "retrieved_cases": [
+      {
+        "case_id": "SYN-CXR-1000",
+        "score": 1.0,
+        "label": "Frontal",
+        "report_text": "Normal chest X-ray. The lungs are clear. Cardiomediastinal silhouette is normal."
+      },
+      {
+        "case_id": "SYN-CXR-1002",
+        "score": 1.0,
+        "label": "Frontal",
+        "report_text": "Increased opacity in the right lower lobe, highly suggestive of lobar pneumonia."
+      },
+      {
+        "case_id": "SYN-CXR-1001",
+        "score": 1.0,
+        "label": "Lateral",
+        "report_text": "Mild cardiomegaly is present. Prominence of the pulmonary vasculature suggests mild congestion."
+      },
+      {
+        "case_id": "SYN-CXR-1003",
+        "score": 1.0,
+        "label": "Lateral",
+        "report_text": "Bilateral pleural effusions with bibasilar atelectasis, worse on the left side."
+      }
+    ],
+    "step_metrics": {
+      "image_encoder": {
+        "latency_ms": 1.6349999932572246,
+        "latent_shape": [
+          1,
+          256
+        ],
+        "l2_norm": 1.0
+      },
+      "quantizer": {
+        "latency_ms": 0.167582998983562,
+        "reconstruction_mse": 0.4019008278846741,
+        "quantizer_type": "ProductQuantizer"
+      },
+      "retriever": {
+        "latency_ms": 0.060624966863542795,
+        "num_retrieved": 4,
+        "similarity_scores": [
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "mean_similarity_score": 1.0
+      },
+      "diagnosis_head": {
+        "latency_ms": 0.3368339966982603,
+        "confidence": 0.7018080949783325,
+        "uncertainty_entropy": 0.6093245148658752,
+        "predicted_label": "Frontal"
+      },
+      "report_generator": {
+        "latency_ms": 238.54787502205,
+        "report_length_chars": 70,
+        "repetition_fallback_triggered": false,
+        "tokens_generated": 11
+      }
+    }
+  },
+  "text_generation_metrics": {
+    "mean_bleu_1": 0.2944820135315261,
+    "mean_bleu_4": 0.21842727415528979,
+    "mean_rouge_l": 0.2845849802371541,
+    "num_evaluated_cases": 4,
+    "per_case_bleu_1": [
+      0.0909090909090909,
+      0.16601831205132045,
+      0.8300915602566021,
+      0.0909090909090909
+    ],
+    "per_case_bleu_4": [
+      0.018850319022747353,
+      0.0204689180374571,
+      0.8155395405382073,
+      0.018850319022747353
+    ],
+    "per_case_rouge_l": [
+      0.09090909090909091,
+      0.08695652173913043,
+      0.8695652173913043,
+      0.09090909090909091
+    ]
+  },
+  "last_epoch": {
+    "epoch": 1,
+    "total_loss": 1.019089549779892,
+    "contrastive_loss": 0.7188960611820221,
+    "classification_loss": 0.6596414893865585,
+    "accuracy": 0.5,
+    "precision": 0.25,
+    "recall": 0.5,
+    "f1_score": 0.3333333333333333,
+    "learning_rate_start": 0.0001,
+    "learning_rate": 0.0,
+    "epoch_duration_sec": 0.9507433749968186,
+    "num_batches": 2,
+    "num_train_samples": 4,
+    "batch_size": 2,
+    "device": "cpu",
+    "is_best": true,
+    "best_loss_before_epoch": Infinity,
+    "per_class_metrics": {
+      "Frontal": {
+        "precision": 0.5,
+        "recall": 1.0,
+        "f1_score": 0.6666666666666666,
+        "support": 2
+      },
+      "Lateral": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1_score": 0.0,
+        "support": 2
+      }
+    },
+    "confusion_matrix": [
+      [
+        2,
+        0
+      ],
+      [
+        2,
+        0
+      ]
+    ]
+  }
+}
