@@ -35,6 +35,54 @@ logging.basicConfig(
 logger = logging.getLogger("train_pipeline")
 
 
+def calculate_lcs(x: list[str], y: list[str]) -> int:
+    """Find length of Longest Common Subsequence between two token sequences."""
+    m, n = len(x), len(y)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if x[i - 1] == y[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            else:
+                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+    return dp[m][n]
+
+
+def calculate_rouge_l(reference: str, candidate: str) -> float:
+    """Calculate ROUGE-L F1-Score for sentence strings."""
+    ref_tokens = reference.lower().split()
+    cand_tokens = candidate.lower().split()
+    if not ref_tokens or not cand_tokens:
+        return 0.0
+    lcs_len = calculate_lcs(ref_tokens, cand_tokens)
+    recall = lcs_len / len(ref_tokens)
+    precision = lcs_len / len(cand_tokens)
+    if recall + precision == 0:
+        return 0.0
+    f1 = (2 * recall * precision) / (recall + precision)
+    return f1
+
+
+def calculate_bleu(reference: str, candidate: str) -> tuple[float, float]:
+    """Calculate BLEU-1 and BLEU-4 score using NLTK."""
+    try:
+        from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+        ref_tokens = [reference.lower().split()]
+        cand_tokens = candidate.lower().split()
+        chencherry = SmoothingFunction()
+        bleu1 = sentence_bleu(ref_tokens, cand_tokens, weights=(1.0, 0, 0, 0), smoothing_function=chencherry.method1)
+        bleu4 = sentence_bleu(ref_tokens, cand_tokens, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=chencherry.method1)
+        return bleu1, bleu4
+    except Exception:
+        ref_tokens = set(reference.lower().split())
+        cand_tokens = candidate.lower().split()
+        if not cand_tokens:
+            return 0.0, 0.0
+        overlap = sum(1 for w in cand_tokens if w in ref_tokens)
+        precision = overlap / len(cand_tokens)
+        return precision, precision
+
+
 def generate_synthetic_cases(num_cases: int = 24) -> list[MedicalCase]:
     """Generates synthetic paired Chest X-ray cases if real dataset is not connected."""
     logger.info(f"Generating {num_cases} synthetic X-ray cases for dry-run training...")
@@ -285,6 +333,44 @@ def main():
     # Rebuild optimized Quantized index
     pipeline.build_vector_index(train_loader)
 
+    # 8. Evaluate Text Generation NLP Metrics (BLEU and ROUGE-L)
+    logger.info("Evaluating text generation performance across reference database...")
+    bleu1_scores = []
+    bleu4_scores = []
+    rouge_l_scores = []
+    
+    # We sample up to 10 cases to prevent long CPU generation times
+    eval_cases = train_cases[:10]
+    for idx, case in enumerate(eval_cases):
+        case_image = train_dataset[idx]["image"].unsqueeze(0).to(device)
+        with torch.no_grad():
+            out = pipeline.diagnose(case_image)
+            cand_report = out.report if out.report is not None else ""
+            ref_report = case.report_text
+            
+            b1, b4 = calculate_bleu(ref_report, cand_report)
+            r_l = calculate_rouge_l(ref_report, cand_report)
+            
+            bleu1_scores.append(b1)
+            bleu4_scores.append(b4)
+            rouge_l_scores.append(r_l)
+            
+    mean_bleu1 = sum(bleu1_scores) / len(bleu1_scores) if bleu1_scores else 0.0
+    mean_bleu4 = sum(bleu4_scores) / len(bleu4_scores) if bleu4_scores else 0.0
+    mean_rouge_l = sum(rouge_l_scores) / len(rouge_l_scores) if rouge_l_scores else 0.0
+
+    # Save final text generation evaluation metrics to a separate JSON file
+    import json
+    text_metrics = {
+        "mean_bleu_1": mean_bleu1,
+        "mean_bleu_4": mean_bleu4,
+        "mean_rouge_l": mean_rouge_l,
+        "num_evaluated_cases": len(eval_cases)
+    }
+    with open(metrics_dir / "text_generation_metrics.json", "w", encoding="utf-8") as f:
+        json.dump(text_metrics, f, indent=4)
+    logger.info(f"Saved text generation evaluation metrics to {metrics_dir / 'text_generation_metrics.json'}")
+
     # Validate end-to-end RAG Inference
     logger.info("Testing post-training RAG clinical diagnosis on query case...")
     query_image = train_dataset[0]["image"].unsqueeze(0).to(device)
@@ -298,6 +384,9 @@ def main():
     table.add_row("Confidence Score", f"{diag_out.confidence * 100:.2f}%")
     table.add_row("Uncertainty (Entropy)", f"{diag_out.uncertainty:.4f}" if diag_out.uncertainty is not None else "N/A")
     table.add_row("Retrieved Matches", str(len(diag_out.retrieved_cases)))
+    table.add_row("Mean BLEU-1", f"{mean_bleu1 * 100:.2f}%")
+    table.add_row("Mean BLEU-4", f"{mean_bleu4 * 100:.2f}%")
+    table.add_row("Mean ROUGE-L", f"{mean_rouge_l * 100:.2f}%")
     table.add_row("Generated Report", diag_out.report)
 
     console.print(table)
