@@ -111,6 +111,9 @@ def generate_synthetic_cases(num_cases: int = 24) -> list[MedicalCase]:
             modality="Chest X-ray",
         )
         cases.append(case)
+    return cases
+
+
 def plot_training_metrics(csv_path: Path, output_path: Path):
     """Generates loss and classification metrics curve plots from training CSV logs."""
     try:
