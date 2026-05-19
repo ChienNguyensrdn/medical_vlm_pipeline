@@ -94,36 +94,36 @@ class LLMReportGenerator(ReportGenerator):
                 )
                 inputs = self.tokenizer(prompt, return_tensors="pt")
 
-                # Project visual embedding to prefix embeddings (Prompt Tuning style)
-                # Query embedding: shape (1, D)
-                if len(image_embedding.shape) == 1:
-                    image_embedding = image_embedding.unsqueeze(0)
-
                 device = next(self.model.parameters()).device
                 input_ids = inputs["input_ids"].to(device)
-                visual_prefix = self.visual_proj(image_embedding.to(device)).unsqueeze(1) # (1, 1, d_model)
+                attention_mask = inputs["attention_mask"].to(device) if "attention_mask" in inputs else None
 
-                # Fetch text embedding weights
-                text_embeddings = self.model.shared(input_ids) # (1, SeqLen, d_model)
-
-                # Prepend visual features to text inputs
-                inputs_embeds = torch.cat([visual_prefix, text_embeddings], dim=1)
-
-                # Generate autoregressively
+                # Generate autoregressively using clean input_ids.
+                # This leverages T5's native semantic space without untrained projection noise.
                 outputs = self.model.generate(
-                    inputs_embeds=inputs_embeds,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
                     max_new_tokens=self.max_new_tokens,
                     num_beams=4,
+                    no_repeat_ngram_size=3,
+                    repetition_penalty=2.5,
                     early_stopping=True,
                 )
                 generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                
+                # Check for gibberish repetition fallback
+                words = generated_text.split()
+                if len(words) > 0 and (words.count(words[0]) > len(words) // 2 or "enfermedades" in generated_text):
+                    logger.warning("Repetition/gibberish detected in LLM output. Activating template synthesizer.")
+                    raise ValueError("Gibberish output detected.")
+
                 return GeneratedReport(
                     text=generated_text,
                     retrieved_case_ids=retrieved_ids,
                     diagnosis_hint=diagnosis_hint
                 )
             except Exception as e:
-                logger.error(f"HF Generation failed: {e}. Falling back to template synthesizer.")
+                logger.error(f"HF Generation failed or fell back: {e}. Falling back to template synthesizer.")
 
         # 2. Premium Clinical Template Synthesizer Fallback
         # Blends knowledge from predicted diagnosis and historical precedents
