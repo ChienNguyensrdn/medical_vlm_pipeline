@@ -147,8 +147,17 @@ cython_debug/
 ehthumbs.db
 Thumbs.db
 
-# Large model weights and vector indices
+# Large model weights, vector indices, and generated datasets
 *.pt
 *.index
 data/
 
+# Generated/demo medical image artifacts
+data/images/
+*.png
+*.jpg
+*.jpeg
+*.dcm
+*.dicom
+*.nii
+*.nii.gz

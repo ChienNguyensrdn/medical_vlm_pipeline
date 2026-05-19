@@ -73,19 +73,55 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def is_device_usable(device: torch.device) -> bool:
+    """Run a tiny kernel smoke test before trusting an accelerator."""
+    if device.type == "cpu":
+        return True
+
+    try:
+        if device.type == "cuda":
+            torch.cuda.set_device(device)
+
+        probe = nn.Sequential(
+            nn.Conv2d(3, 4, kernel_size=3, padding=1),
+            nn.BatchNorm2d(4),
+            nn.ReLU(inplace=True),
+        ).to(device)
+        x = torch.randn(2, 3, 16, 16, device=device)
+        y = probe(x).mean()
+        y.backward()
+
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        return True
+    except Exception as exc:
+        logger.warning(
+            "Accelerator %s failed the kernel smoke test and will be skipped: %s",
+            device,
+            exc,
+        )
+        return False
+
+
 def select_device(requested_device: str = "auto") -> torch.device:
     if requested_device == "cuda":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return device if is_device_usable(device) else torch.device("cpu")
     if requested_device == "mps":
         is_mps_available = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-        return torch.device("mps" if is_mps_available else "cpu")
+        device = torch.device("mps" if is_mps_available else "cpu")
+        return device if is_device_usable(device) else torch.device("cpu")
     if requested_device == "cpu":
         return torch.device("cpu")
 
     if torch.cuda.is_available():
-        return torch.device("cuda")
+        device = torch.device("cuda")
+        if is_device_usable(device):
+            return device
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return torch.device("mps")
+        device = torch.device("mps")
+        if is_device_usable(device):
+            return device
     return torch.device("cpu")
 
 
