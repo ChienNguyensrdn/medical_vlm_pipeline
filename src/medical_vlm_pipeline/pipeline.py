@@ -28,6 +28,7 @@ class DiagnosisOutput:
     latent_embedding: Tensor | None = None
     quantized_embedding: Tensor | None = None
     uncertainty: float | None = None
+    step_metrics: dict[str, Any] | None = None
 
 
 class MedicalVLMPipeline(nn.Module):
@@ -160,24 +161,57 @@ class MedicalVLMPipeline(nn.Module):
         logger.info("Vector database indexing successfully constructed.")
 
     def diagnose(self, image: Tensor) -> DiagnosisOutput:
-        """Execute the complete end-to-end RAG clinical inference pipeline.
+        """Execute the complete end-to-end RAG clinical inference pipeline with step profiling.
 
         Args:
             image: Single input scan or batch image tensor. Shape (1, C, H, W) or (1, C, D, H, W).
         """
+        import time
         self.eval()
+        step_metrics = {}
+
         with torch.no_grad():
             # 1. Encode image to aligned space
+            t_start = time.perf_counter()
             latent = self.encode_image(image)
+            t_image = time.perf_counter() - t_start
+            
+            step_metrics["image_encoder"] = {
+                "latency_ms": t_image * 1000,
+                "latent_shape": list(latent.shape),
+                "l2_norm": float(torch.norm(latent, p=2).item())
+            }
 
             # 2. Apply quantization compression
+            t_start = time.perf_counter()
             quant_res = self.quantizer.encode(latent)
             query_embedding = quant_res.reconstructed if quant_res.reconstructed is not None else latent
+            t_quant = time.perf_counter() - t_start
+            
+            # Reconstruction distortion (MSE)
+            reconstruction_mse = float(F.mse_loss(latent, query_embedding).item())
+            step_metrics["quantizer"] = {
+                "latency_ms": t_quant * 1000,
+                "reconstruction_mse": reconstruction_mse,
+                "quantizer_type": self.quantizer.__class__.__name__
+            }
 
             # 3. Vector Database Retrieval (similar cases)
+            t_start = time.perf_counter()
             retrieved = self.retriever.search(query_embedding, top_k=self.config.retrieval.top_k)
+            t_retrieve = time.perf_counter() - t_start
+            
+            scores = [r.score for r in retrieved]
+            mean_score = sum(scores) / len(scores) if scores else 0.0
+            step_metrics["retriever"] = {
+                "latency_ms": t_retrieve * 1000,
+                "num_retrieved": len(retrieved),
+                "similarity_scores": scores,
+                "mean_similarity_score": mean_score
+            }
 
             # 4. Diagnose Head prediction with epistemic uncertainty estimation via MC Dropout
+            t_start = time.perf_counter()
             if hasattr(self.diagnosis_head, "predict_with_uncertainty"):
                 mc_res = self.diagnosis_head.predict_with_uncertainty(query_embedding, num_samples=20)
                 pred_idx = mc_res["predicted_class"][0]
@@ -189,15 +223,31 @@ class MedicalVLMPipeline(nn.Module):
                 conf, pred_idx = torch.max(probabilities, dim=-1)
                 confidence = float(conf.item())
                 uncertainty_score = 0.0
-
+            t_class = time.perf_counter() - t_start
+            
             diagnosis_label = self.class_names[int(pred_idx.item())]
+            step_metrics["diagnosis_head"] = {
+                "latency_ms": t_class * 1000,
+                "confidence": confidence,
+                "uncertainty_entropy": uncertainty_score,
+                "predicted_label": diagnosis_label
+            }
 
             # 5. Multimodal Report Generation
+            t_start = time.perf_counter()
             report_out = self.report_generator.generate(
                 image_embedding=query_embedding,
                 retrieved_context=retrieved,
                 diagnosis_hint=diagnosis_label
             )
+            t_report = time.perf_counter() - t_start
+            
+            step_metrics["report_generator"] = {
+                "latency_ms": t_report * 1000,
+                "report_length_chars": len(report_out.text) if report_out.text else 0,
+                "repetition_fallback_triggered": getattr(report_out, "fallback_triggered", False),
+                "tokens_generated": len(report_out.text.split()) if report_out.text else 0
+            }
 
             return DiagnosisOutput(
                 diagnosis=diagnosis_label,
@@ -206,7 +256,8 @@ class MedicalVLMPipeline(nn.Module):
                 report=report_out.text,
                 latent_embedding=latent,
                 quantized_embedding=query_embedding,
-                uncertainty=uncertainty_score
+                uncertainty=uncertainty_score,
+                step_metrics=step_metrics
             )
 
     def forward(self, images: Tensor) -> Tensor:

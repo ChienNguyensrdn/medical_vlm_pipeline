@@ -136,6 +136,18 @@ def main() -> None:
     logger.info(f"Confidence Score:    {diagnosis_output.confidence * 100:.2f}%")
     logger.info(f"Uncertainty (Entropy): {diagnosis_output.uncertainty:.4f}" if diagnosis_output.uncertainty is not None else "Uncertainty: N/A")
     logger.info("-" * 60)
+    
+    if diagnosis_output.step_metrics is not None:
+        logger.info("              STEP-BY-STEP PARAMETERS & METRICS         ")
+        logger.info("-" * 60)
+        for step, metrics in diagnosis_output.step_metrics.items():
+            logger.info(f"Step: {step.upper()}")
+            for k, v in metrics.items():
+                if isinstance(v, float):
+                    logger.info(f"  - {k}: {v:.4f}")
+                else:
+                    logger.info(f"  - {k}: {v}")
+        logger.info("-" * 60)
 
     logger.info(f"Retrieved Similar Precedent Cases:")
     for idx, case in enumerate(diagnosis_output.retrieved_cases):
