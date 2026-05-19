@@ -143,3 +143,53 @@ class MedicalCaseDataset(Dataset):
                 item["attention_mask"] = tokens["attention_mask"].squeeze(0)
 
         return item
+
+
+def load_iu_chest_xray_cases(csv_path: str | Path, images_dir: str | Path) -> list[MedicalCase]:
+    """Helper to parse IU Chest X-ray cleaned_dataset.csv and load paired cases.
+
+    Args:
+        csv_path: Path to cleaned_dataset.csv.
+        images_dir: Path to the specific resized folder (e.g. 'resized_images/256').
+    """
+    import pandas as pd
+    csv_path = Path(csv_path)
+    images_dir = Path(images_dir)
+
+    if not csv_path.exists():
+        logger.error(f"Dataset CSV not found at: {csv_path}")
+        return []
+
+    logger.info(f"Loading IU Chest X-ray cases from: {csv_path}")
+    df = pd.read_csv(csv_path)
+
+    cases = []
+    # Verify required columns are present
+    required_cols = {"image_id", "org_caption"}
+    if not required_cols.issubset(df.columns):
+        logger.warning(
+            f"CSV columns {df.columns} do not contain expected {required_cols}. "
+            "Loading empty case list."
+        )
+        return []
+
+    for _, row in df.iterrows():
+        image_id = str(row["image_id"])
+        image_path = images_dir / image_id
+
+        # Clean report text
+        caption = str(row["org_caption"]) if not pd.isna(row["org_caption"]) else ""
+        projection = str(row["projection"]) if "projection" in df.columns and not pd.isna(row["projection"]) else "Frontal"
+
+        case = MedicalCase(
+            case_id=image_id.split(".")[0],
+            image_path=image_path,
+            report_text=caption,
+            label=projection,  # Frontal/Lateral projection as label
+            modality="Chest X-ray",
+        )
+        cases.append(case)
+
+    logger.info(f"Successfully loaded {len(cases)} cases from IU Chest X-ray CSV.")
+    return cases
+
