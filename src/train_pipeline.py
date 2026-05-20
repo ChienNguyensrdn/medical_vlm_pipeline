@@ -60,6 +60,42 @@ def parse_args() -> argparse.Namespace:
         help="Dataset directory containing cleaned_dataset.csv and resized_images/256.",
     )
     parser.add_argument(
+        "--target-column",
+        default="projection",
+        help=(
+            "CSV column used as the classification target. Use 'auto' to prefer "
+            "diagnosis/finding columns when present."
+        ),
+    )
+    parser.add_argument(
+        "--derive-labels-from-report",
+        action="store_true",
+        help="Derive weak pathology labels from org_caption instead of using projection labels.",
+    )
+    parser.add_argument(
+        "--min-class-count",
+        type=int,
+        default=8,
+        help="Group labels with fewer than this many examples into Other.",
+    )
+    parser.add_argument(
+        "--val-split",
+        type=float,
+        default=0.15,
+        help="Validation fraction. Use 0 to train without validation metrics.",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=2,
+        help="DataLoader workers. Kaggle T4 usually works well with 2.",
+    )
+    parser.add_argument(
+        "--no-amp",
+        action="store_true",
+        help="Disable CUDA automatic mixed precision.",
+    )
+    parser.add_argument(
         "--synthetic-cases",
         type=int,
         default=32,
@@ -123,6 +159,21 @@ def select_device(requested_device: str = "auto") -> torch.device:
         if is_device_usable(device):
             return device
     return torch.device("cpu")
+
+
+def configure_torch_runtime(device: torch.device) -> None:
+    """Enable conservative CUDA performance options after device selection."""
+    if device.type != "cuda":
+        return
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+    logger.info(
+        "CUDA runtime ready: %s | capability=%s | torch_cuda=%s",
+        torch.cuda.get_device_name(device),
+        torch.cuda.get_device_capability(device),
+        torch.version.cuda,
+    )
 
 
 def to_jsonable(value: Any) -> Any:
@@ -200,6 +251,145 @@ def write_case_index(path: Path, cases: list[MedicalCase]) -> None:
                 "modality": case.modality,
                 "report_text": case.report_text,
             })
+
+
+def split_cases(
+    cases: list[MedicalCase],
+    val_split: float,
+    seed: int = 42,
+) -> tuple[list[MedicalCase], list[MedicalCase]]:
+    """Create a deterministic stratified train/validation split when possible."""
+    if val_split <= 0 or len(cases) < 4:
+        return cases, []
+    val_split = min(max(val_split, 0.0), 0.5)
+    indices = list(range(len(cases)))
+    labels = [case.label or "Other" for case in cases]
+    try:
+        from sklearn.model_selection import train_test_split
+
+        train_idx, val_idx = train_test_split(
+            indices,
+            test_size=val_split,
+            random_state=seed,
+            shuffle=True,
+            stratify=labels,
+        )
+    except Exception as exc:
+        logger.warning("Stratified split failed (%s). Falling back to random split.", exc)
+        generator = torch.Generator().manual_seed(seed)
+        permuted = torch.randperm(len(cases), generator=generator).tolist()
+        val_size = max(1, int(round(len(cases) * val_split)))
+        val_idx = permuted[:val_size]
+        train_idx = permuted[val_size:]
+    return [cases[i] for i in train_idx], [cases[i] for i in val_idx]
+
+
+def labels_to_tensor(labels: list[str], label_to_idx: dict[str, int], device: torch.device) -> torch.Tensor:
+    return torch.tensor(
+        [label_to_idx.get(lbl, label_to_idx.get("Other", 0)) for lbl in labels],
+        dtype=torch.long,
+        device=device,
+    )
+
+
+def evaluate_loader(
+    pipeline: MedicalVLMPipeline,
+    loader: DataLoader,
+    label_to_idx: dict[str, int],
+    class_names: list[str],
+    device: torch.device,
+    use_contrastive: bool = True,
+) -> dict[str, Any]:
+    """Evaluate classification and optional contrastive losses on a loader."""
+    pipeline.eval()
+    total_loss = 0.0
+    total_class = 0.0
+    total_contrastive = 0.0
+    total_batches = 0
+    all_preds: list[int] = []
+    all_targets: list[int] = []
+
+    with torch.no_grad():
+        for batch in loader:
+            images = batch["image"].to(device, non_blocking=device.type == "cuda")
+            labels = batch["label"]
+            label_idxs = labels_to_tensor(labels, label_to_idx, device)
+            logits = pipeline(images)
+            class_loss = nn.CrossEntropyLoss()(logits, label_idxs)
+
+            if use_contrastive and "input_ids" in batch:
+                input_ids = batch["input_ids"].to(device, non_blocking=device.type == "cuda")
+                attention_mask = (
+                    batch["attention_mask"].to(device, non_blocking=device.type == "cuda")
+                    if "attention_mask" in batch
+                    else None
+                )
+                image_embeddings = pipeline.encode_image(images)
+                text_embeddings = pipeline.encode_text(input_ids, attention_mask)
+                contrastive_loss = infonce_loss(image_embeddings, text_embeddings)
+            else:
+                contrastive_loss = torch.tensor(0.0, device=device)
+
+            total_batches += 1
+            total_class += float(class_loss.item())
+            total_contrastive += float(contrastive_loss.item())
+            total_loss += float((class_loss + 0.5 * contrastive_loss).item())
+            all_preds.extend(torch.argmax(logits, dim=-1).cpu().tolist())
+            all_targets.extend(label_idxs.cpu().tolist())
+
+    metrics: dict[str, Any] = {
+        "total_loss": total_loss / total_batches if total_batches else 0.0,
+        "contrastive_loss": total_contrastive / total_batches if total_batches else 0.0,
+        "classification_loss": total_class / total_batches if total_batches else 0.0,
+        "accuracy": 0.0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1_score": 0.0,
+        "per_class_metrics": {},
+        "confusion_matrix": [],
+    }
+    if not all_targets:
+        return metrics
+
+    try:
+        from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_fscore_support
+
+        metrics["accuracy"] = float(accuracy_score(all_targets, all_preds))
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            all_targets,
+            all_preds,
+            average="weighted",
+            zero_division=0,
+        )
+        metrics["precision"] = float(precision)
+        metrics["recall"] = float(recall)
+        metrics["f1_score"] = float(f1)
+        class_precision, class_recall, class_f1, class_support = precision_recall_fscore_support(
+            all_targets,
+            all_preds,
+            labels=list(range(len(class_names))),
+            average=None,
+            zero_division=0,
+        )
+        metrics["confusion_matrix"] = confusion_matrix(
+            all_targets,
+            all_preds,
+            labels=list(range(len(class_names))),
+        ).tolist()
+        metrics["per_class_metrics"] = {
+            class_name: {
+                "precision": float(class_precision[idx]),
+                "recall": float(class_recall[idx]),
+                "f1_score": float(class_f1[idx]),
+                "support": int(class_support[idx]),
+            }
+            for idx, class_name in enumerate(class_names)
+        }
+    except ImportError:
+        correct = sum(1 for pred, target in zip(all_preds, all_targets) if pred == target)
+        accuracy = correct / len(all_targets)
+        metrics.update({"accuracy": accuracy, "precision": accuracy, "recall": accuracy, "f1_score": accuracy})
+    return metrics
 
 
 def save_training_checkpoint(
@@ -328,6 +518,8 @@ def plot_training_metrics(csv_path: Path, output_path: Path):
         axes[0].plot(df["epoch"], df["total_loss"], label="Total Joint Loss", color="#d62728", linewidth=2.5)
         axes[0].plot(df["epoch"], df["contrastive_loss"], label="Contrastive InfoNCE Loss", color="#1f77b4", linestyle="--")
         axes[0].plot(df["epoch"], df["classification_loss"], label="Classification CE Loss", color="#2ca02c", linestyle=":")
+        if "val_total_loss" in df.columns and df["val_total_loss"].notna().any():
+            axes[0].plot(df["epoch"], df["val_total_loss"], label="Validation Joint Loss", color="#7f7f7f", linewidth=2.0)
         axes[0].set_title("Training Loss Curves", fontsize=14, fontweight="bold", pad=12)
         axes[0].set_xlabel("Epoch", fontsize=12)
         axes[0].set_ylabel("Loss Value", fontsize=12)
@@ -341,6 +533,13 @@ def plot_training_metrics(csv_path: Path, output_path: Path):
         if f1_vals.max() <= 1.0:
             f1_vals = f1_vals * 100
         axes[1].plot(df["epoch"], f1_vals, label="F1-Score (%)", color="#ff7f0e", linewidth=2.5)
+        if "val_accuracy" in df.columns and df["val_accuracy"].notna().any():
+            axes[1].plot(df["epoch"], df["val_accuracy"] * 100, label="Val Accuracy (%)", color="#8c564b", linewidth=2.0)
+        if "val_f1_score" in df.columns and df["val_f1_score"].notna().any():
+            val_f1_vals = df["val_f1_score"]
+            if val_f1_vals.max() <= 1.0:
+                val_f1_vals = val_f1_vals * 100
+            axes[1].plot(df["epoch"], val_f1_vals, label="Val F1-Score (%)", color="#17becf", linewidth=2.0)
         
         axes[1].set_title("Classification Performance Metrics", fontsize=14, fontweight="bold", pad=12)
         axes[1].set_xlabel("Epoch", fontsize=12)
@@ -372,7 +571,10 @@ def main():
         config.training.batch_size = args.batch_size
 
     device = select_device(args.device)
+    configure_torch_runtime(device)
     logger.info(f"Using training accelerator device: {device}")
+    if args.device == "cuda" and device.type != "cuda":
+        logger.warning("CUDA was requested but failed availability/smoke checks; falling back to CPU.")
     if args.device == "mps" and device.type != "mps":
         logger.warning("Apple MPS was requested but is not available in this Python/PyTorch environment.")
 
@@ -392,18 +594,35 @@ def main():
     # 2. Load Dataset
     if os.path.exists(csv_path):
         logger.info(f"Connected to IU Chest X-rays dataset on Kaggle at: {csv_path}")
-        train_cases = load_iu_chest_xray_cases(csv_path, images_dir)
+        all_cases = load_iu_chest_xray_cases(
+            csv_path,
+            images_dir,
+            label_column=args.target_column,
+            derive_labels_from_report=args.derive_labels_from_report,
+            min_class_count=args.min_class_count,
+        )
         dataset_source = "real"
     else:
         logger.warning(
             f"Dataset CSV not found at: {csv_path}. Falling back to high-quality synthetic dry-run."
         )
-        train_cases = generate_synthetic_cases(num_cases=args.synthetic_cases)
+        all_cases = generate_synthetic_cases(num_cases=args.synthetic_cases)
         dataset_source = "synthetic"
 
-    if not train_cases:
+    if not all_cases:
         logger.error("No training cases loaded. Exiting.")
         sys.exit(1)
+
+    train_cases, val_cases = split_cases(all_cases, args.val_split)
+    if not train_cases:
+        logger.error("No training cases remain after splitting. Exiting.")
+        sys.exit(1)
+    logger.info(
+        "Dataset split: %d train / %d validation cases (val_split=%.2f)",
+        len(train_cases),
+        len(val_cases),
+        args.val_split,
+    )
 
     write_json(metrics_dir / "environment.json", environment_snapshot(device))
     write_json(
@@ -418,15 +637,24 @@ def main():
                 "dataset_dir": dataset_dir,
                 "csv_path": csv_path,
                 "images_dir": images_dir,
-                "num_cases": len(train_cases),
-                "label_counts": count_values([case.label or "" for case in train_cases]),
-                "modality_counts": count_values([case.modality or "" for case in train_cases]),
-                "sample_case_ids": [case.case_id for case in train_cases[:10]],
+                "num_cases": len(all_cases),
+                "num_train_cases": len(train_cases),
+                "num_validation_cases": len(val_cases),
+                "target_column": args.target_column,
+                "derive_labels_from_report": args.derive_labels_from_report,
+                "label_counts": count_values([case.label or "" for case in all_cases]),
+                "train_label_counts": count_values([case.label or "" for case in train_cases]),
+                "validation_label_counts": count_values([case.label or "" for case in val_cases]),
+                "modality_counts": count_values([case.modality or "" for case in all_cases]),
+                "sample_case_ids": [case.case_id for case in all_cases[:10]],
             },
             "environment": environment_snapshot(device),
         },
     )
-    write_case_index(metrics_dir / "case_index.csv", train_cases)
+    write_case_index(metrics_dir / "case_index.csv", all_cases)
+    write_case_index(metrics_dir / "train_case_index.csv", train_cases)
+    if val_cases:
+        write_case_index(metrics_dir / "validation_case_index.csv", val_cases)
 
     # 3. Instantiate Tokenizer & Wrapper
     # Use fallback Bidirectional LSTM or HuggingFace Tokenizer
@@ -446,17 +674,52 @@ def main():
         max_length=128,
         image_size=config.data.image_size,
     )
+    val_dataset = MedicalCaseDataset(
+        cases=val_cases,
+        tokenizer=tokenizer,
+        max_length=128,
+        image_size=config.data.image_size,
+    ) if val_cases else None
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.training.batch_size,
         shuffle=True,
         drop_last=len(train_dataset) > config.training.batch_size,
+        num_workers=max(args.num_workers, 0),
+        pin_memory=device.type == "cuda",
+        persistent_workers=args.num_workers > 0,
     )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config.training.batch_size,
+        shuffle=False,
+        drop_last=False,
+        num_workers=max(args.num_workers, 0),
+        pin_memory=device.type == "cuda",
+        persistent_workers=args.num_workers > 0,
+    ) if val_dataset is not None else None
+
+    if device.type == "cuda":
+        logger.info(
+            "CUDA DataLoader enabled with num_workers=%d, pin_memory=True, amp=%s",
+            args.num_workers,
+            not args.no_amp,
+        )
+    else:
+        logger.info(
+            "DataLoader enabled with num_workers=%d on %s. GPU acceleration is not active.",
+            args.num_workers,
+            device,
+        )
 
     # 4. Instantiate VLM Pipeline
-    class_names = ["Frontal", "Lateral"]
+    class_names = sorted({case.label or "Other" for case in all_cases})
     num_classes = len(class_names)
+    if num_classes < 2:
+        logger.error("Need at least two target classes. Found: %s", class_names)
+        sys.exit(1)
+    logger.info("Classification target classes: %s", class_names)
 
     logger.info("Instantiating End-to-End Multimodal VLM Pipeline...")
     pipeline = MedicalVLMPipeline(config, num_classes=num_classes, class_names=class_names)
@@ -487,6 +750,7 @@ def main():
 
     epoch_records: list[dict[str, Any]] = []
     label_to_idx = {name: idx for idx, name in enumerate(class_names)}
+    best_metric_name = "val_total_loss" if val_loader is not None else "total_loss"
     write_json(
         model_artifacts_dir / "label_map.json",
         {
@@ -495,6 +759,7 @@ def main():
             "idx_to_label": {idx: label for label, idx in label_to_idx.items()},
         },
     )
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and not args.no_amp)
 
     for epoch in range(1, epochs + 1):
         epoch_start = time.perf_counter()
@@ -511,40 +776,42 @@ def main():
         for batch in progress_bar:
             optimizer.zero_grad()
 
-            images = batch["image"].to(device)
+            images = batch["image"].to(device, non_blocking=device.type == "cuda")
             reports = batch["report_text"]
             labels = batch["label"]
 
             # Map text label string to index tensor
-            label_idxs = torch.tensor(
-                [label_to_idx.get(lbl, 0) for lbl in labels], dtype=torch.long, device=device
-            )
+            label_idxs = labels_to_tensor(labels, label_to_idx, device)
 
-            # A. Classification Loss via forward
-            classification_logits = pipeline(images)
-            classification_loss = nn.CrossEntropyLoss()(classification_logits, label_idxs)
+            with torch.amp.autocast("cuda", enabled=device.type == "cuda" and not args.no_amp):
+                # A. Classification Loss via forward
+                classification_logits = pipeline(images)
+                classification_loss = nn.CrossEntropyLoss()(classification_logits, label_idxs)
 
-            # B. Cross-modal Contrastive Loss via embeddings
-            # For InfoNCE, we require tokenized input_ids
-            if "input_ids" in batch:
-                input_ids = batch["input_ids"].to(device)
-                attention_mask = (
-                    batch["attention_mask"].to(device) if "attention_mask" in batch else None
-                )
+                # B. Cross-modal Contrastive Loss via embeddings
+                # For InfoNCE, we require tokenized input_ids
+                if "input_ids" in batch:
+                    input_ids = batch["input_ids"].to(device, non_blocking=device.type == "cuda")
+                    attention_mask = (
+                        batch["attention_mask"].to(device, non_blocking=device.type == "cuda")
+                        if "attention_mask" in batch
+                        else None
+                    )
 
-                image_embeddings = pipeline.encode_image(images)
-                text_embeddings = pipeline.encode_text(input_ids, attention_mask)
+                    image_embeddings = pipeline.encode_image(images)
+                    text_embeddings = pipeline.encode_text(input_ids, attention_mask)
 
-                contrastive_loss = infonce_loss(image_embeddings, text_embeddings)
-            else:
-                # Dummy placeholder if tokenizer is offline/failed
-                contrastive_loss = torch.tensor(0.0, device=device)
+                    contrastive_loss = infonce_loss(image_embeddings, text_embeddings)
+                else:
+                    # Dummy placeholder if tokenizer is offline/failed
+                    contrastive_loss = torch.tensor(0.0, device=device)
 
-            # Joint optimization objective
-            total_loss = classification_loss + 0.5 * contrastive_loss
+                # Joint optimization objective
+                total_loss = classification_loss + 0.5 * contrastive_loss
 
-            total_loss.backward()
-            optimizer.step()
+            scaler.scale(total_loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             epoch_loss += total_loss.item()
             epoch_contrastive += contrastive_loss.item()
@@ -560,79 +827,53 @@ def main():
         avg_contrastive = epoch_contrastive / num_batches
         avg_class = epoch_class / num_batches
 
-        # Collect predictions and targets for classification metrics evaluation
-        pipeline.eval()
-        all_preds = []
-        all_targets = []
-        with torch.no_grad():
-            for batch in train_loader:
-                images = batch["image"].to(device)
-                labels = batch["label"]
-                label_idxs = torch.tensor(
-                    [label_to_idx.get(lbl, 0) for lbl in labels], dtype=torch.long, device=device
-                )
-                logits = pipeline(images)
-                preds = torch.argmax(logits, dim=-1)
-                all_preds.extend(preds.cpu().numpy())
-                all_targets.extend(label_idxs.cpu().numpy())
-
-        # Calculate Accuracy, Precision, Recall, F1-Score
-        per_class_metrics: dict[str, dict[str, float]] = {}
-        confusion_matrix_data: list[list[int]] = []
-        try:
-            from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_fscore_support
-            accuracy = float(accuracy_score(all_targets, all_preds))
-            precision, recall, f1, _ = precision_recall_fscore_support(all_targets, all_preds, average="weighted", zero_division=0)
-            precision, recall, f1 = float(precision), float(recall), float(f1)
-            class_precision, class_recall, class_f1, class_support = precision_recall_fscore_support(
-                all_targets,
-                all_preds,
-                labels=list(range(num_classes)),
-                average=None,
-                zero_division=0,
-            )
-            confusion_matrix_data = confusion_matrix(
-                all_targets,
-                all_preds,
-                labels=list(range(num_classes)),
-            ).tolist()
-            for idx, class_name in enumerate(class_names):
-                per_class_metrics[class_name] = {
-                    "precision": float(class_precision[idx]),
-                    "recall": float(class_recall[idx]),
-                    "f1_score": float(class_f1[idx]),
-                    "support": int(class_support[idx]),
-                }
-        except ImportError:
-            correct = sum(1 for p, t in zip(all_preds, all_targets) if p == t)
-            accuracy = correct / len(all_targets) if len(all_targets) > 0 else 0.0
-            precision, recall, f1 = accuracy, accuracy, accuracy
+        train_eval = evaluate_loader(pipeline, train_loader, label_to_idx, class_names, device)
+        val_eval = (
+            evaluate_loader(pipeline, val_loader, label_to_idx, class_names, device)
+            if val_loader is not None
+            else None
+        )
 
         scheduler.step()
         learning_rate_end = optimizer.param_groups[0]["lr"]
         epoch_duration_sec = time.perf_counter() - epoch_start
 
-        is_best = avg_loss < best_loss
+        selection_loss = val_eval["total_loss"] if val_eval is not None else avg_loss
+        is_best = selection_loss < best_loss
         epoch_record = {
             "epoch": epoch,
             "total_loss": avg_loss,
             "contrastive_loss": avg_contrastive,
             "classification_loss": avg_class,
-            "accuracy": accuracy,
-            "precision": precision,
-            "recall": recall,
-            "f1_score": f1,
+            "accuracy": train_eval["accuracy"],
+            "precision": train_eval["precision"],
+            "recall": train_eval["recall"],
+            "f1_score": train_eval["f1_score"],
+            "eval_total_loss": train_eval["total_loss"],
+            "eval_contrastive_loss": train_eval["contrastive_loss"],
+            "eval_classification_loss": train_eval["classification_loss"],
+            "val_total_loss": val_eval["total_loss"] if val_eval is not None else None,
+            "val_contrastive_loss": val_eval["contrastive_loss"] if val_eval is not None else None,
+            "val_classification_loss": val_eval["classification_loss"] if val_eval is not None else None,
+            "val_accuracy": val_eval["accuracy"] if val_eval is not None else None,
+            "val_precision": val_eval["precision"] if val_eval is not None else None,
+            "val_recall": val_eval["recall"] if val_eval is not None else None,
+            "val_f1_score": val_eval["f1_score"] if val_eval is not None else None,
             "learning_rate_start": learning_rate_start,
             "learning_rate": learning_rate_end,
             "epoch_duration_sec": epoch_duration_sec,
             "num_batches": num_batches,
             "num_train_samples": len(train_dataset),
+            "num_validation_samples": len(val_dataset) if val_dataset is not None else 0,
             "batch_size": config.training.batch_size,
             "device": str(device),
             "is_best": is_best,
             "best_loss_before_epoch": best_loss,
-            "per_class_metrics": per_class_metrics,
-            "confusion_matrix": confusion_matrix_data,
+            "best_metric_name": best_metric_name,
+            "per_class_metrics": train_eval["per_class_metrics"],
+            "confusion_matrix": train_eval["confusion_matrix"],
+            "validation_per_class_metrics": val_eval["per_class_metrics"] if val_eval is not None else {},
+            "validation_confusion_matrix": val_eval["confusion_matrix"] if val_eval is not None else [],
         }
         epoch_records.append(epoch_record)
 
@@ -650,46 +891,83 @@ def main():
                     "precision",
                     "recall",
                     "f1_score",
+                    "eval_total_loss",
+                    "eval_contrastive_loss",
+                    "eval_classification_loss",
+                    "val_total_loss",
+                    "val_contrastive_loss",
+                    "val_classification_loss",
+                    "val_accuracy",
+                    "val_precision",
+                    "val_recall",
+                    "val_f1_score",
                     "learning_rate_start",
                     "learning_rate",
                     "epoch_duration_sec",
                     "num_batches",
                     "num_train_samples",
+                    "num_validation_samples",
                     "batch_size",
                     "device",
                     "is_best",
                     "best_loss_before_epoch",
+                    "best_metric_name",
                     *[
                         f"{class_name}_{metric_name}"
                         for class_name in class_names
                         for metric_name in ("precision", "recall", "f1_score", "support")
                     ],
                     "confusion_matrix_json",
+                    *[
+                        f"val_{class_name}_{metric_name}"
+                        for class_name in class_names
+                        for metric_name in ("precision", "recall", "f1_score", "support")
+                    ],
+                    "validation_confusion_matrix_json",
                 ])
             writer.writerow([
                 epoch,
                 f"{avg_loss:.6f}",
                 f"{avg_contrastive:.6f}",
                 f"{avg_class:.6f}",
-                f"{accuracy:.6f}",
-                f"{precision:.6f}",
-                f"{recall:.6f}",
-                f"{f1:.6f}",
+                f"{train_eval['accuracy']:.6f}",
+                f"{train_eval['precision']:.6f}",
+                f"{train_eval['recall']:.6f}",
+                f"{train_eval['f1_score']:.6f}",
+                f"{train_eval['total_loss']:.6f}",
+                f"{train_eval['contrastive_loss']:.6f}",
+                f"{train_eval['classification_loss']:.6f}",
+                f"{val_eval['total_loss']:.6f}" if val_eval is not None else "",
+                f"{val_eval['contrastive_loss']:.6f}" if val_eval is not None else "",
+                f"{val_eval['classification_loss']:.6f}" if val_eval is not None else "",
+                f"{val_eval['accuracy']:.6f}" if val_eval is not None else "",
+                f"{val_eval['precision']:.6f}" if val_eval is not None else "",
+                f"{val_eval['recall']:.6f}" if val_eval is not None else "",
+                f"{val_eval['f1_score']:.6f}" if val_eval is not None else "",
                 f"{learning_rate_start:.8f}",
                 f"{learning_rate_end:.8f}",
                 f"{epoch_duration_sec:.4f}",
                 num_batches,
                 len(train_dataset),
+                len(val_dataset) if val_dataset is not None else 0,
                 config.training.batch_size,
                 str(device),
                 int(is_best),
                 f"{best_loss:.6f}",
+                best_metric_name,
                 *[
-                    per_class_metrics.get(class_name, {}).get(metric_name, 0.0)
+                    train_eval["per_class_metrics"].get(class_name, {}).get(metric_name, 0.0)
                     for class_name in class_names
                     for metric_name in ("precision", "recall", "f1_score", "support")
                 ],
-                json.dumps(confusion_matrix_data),
+                json.dumps(train_eval["confusion_matrix"]),
+                *[
+                    (val_eval["per_class_metrics"].get(class_name, {}).get(metric_name, 0.0)
+                     if val_eval is not None else 0.0)
+                    for class_name in class_names
+                    for metric_name in ("precision", "recall", "f1_score", "support")
+                ],
+                json.dumps(val_eval["confusion_matrix"] if val_eval is not None else []),
             ])
 
         write_json(
@@ -703,13 +981,19 @@ def main():
         console.print(
             f"[bold green]✓ Epoch {epoch:02d}/{epochs:02d}[/bold green] | "
             f"Loss: [bold cyan]{avg_loss:.4f}[/bold cyan] | "
-            f"Acc: [bold magenta]{accuracy * 100:.2f}%[/bold magenta] | "
-            f"F1: [bold yellow]{f1:.4f}[/bold yellow]"
+            f"Train Acc: [bold magenta]{train_eval['accuracy'] * 100:.2f}%[/bold magenta] | "
+            f"Train F1: [bold yellow]{train_eval['f1_score']:.4f}[/bold yellow]"
+            + (
+                f" | Val Acc: [bold magenta]{val_eval['accuracy'] * 100:.2f}%[/bold magenta]"
+                f" | Val F1: [bold yellow]{val_eval['f1_score']:.4f}[/bold yellow]"
+                if val_eval is not None
+                else ""
+            )
         )
 
         # Save Best Checkpoint
         if is_best:
-            best_loss = avg_loss
+            best_loss = selection_loss
             checkpoint_path = Path("best_model.pt")
             torch.save(pipeline.state_dict(), checkpoint_path)
             torch.save(pipeline.state_dict(), model_artifacts_dir / "best_model_state_dict.pt")
@@ -764,8 +1048,13 @@ def main():
             "class_names": class_names,
             "label_to_idx": label_to_idx,
             "dataset_source": dataset_source,
+            "num_cases": len(all_cases),
             "num_train_cases": len(train_cases),
+            "num_validation_cases": len(val_cases),
+            "target_column": args.target_column,
+            "derive_labels_from_report": args.derive_labels_from_report,
             "best_loss": best_loss,
+            "best_metric_name": best_metric_name,
             "artifacts": {
                 "root_best_model_state_dict": str(Path("best_model.pt")),
                 "best_model_state_dict": str(model_artifacts_dir / "best_model_state_dict.pt"),
@@ -775,6 +1064,8 @@ def main():
                 "retriever_index_base": str(retriever_index_base),
                 "label_map": str(model_artifacts_dir / "label_map.json"),
                 "case_index": str(metrics_dir / "case_index.csv"),
+                "train_case_index": str(metrics_dir / "train_case_index.csv"),
+                "validation_case_index": str(metrics_dir / "validation_case_index.csv"),
             },
             "reload_notes": [
                 "Instantiate PipelineConfig and MedicalVLMPipeline with the saved class_names.",
@@ -917,7 +1208,11 @@ def main():
         "run_duration_sec": run_duration_sec,
         "best_loss": best_loss,
         "dataset_source": dataset_source,
+        "num_cases": len(all_cases),
         "num_train_cases": len(train_cases),
+        "num_validation_cases": len(val_cases),
+        "target_column": args.target_column,
+        "derive_labels_from_report": args.derive_labels_from_report,
         "device": str(device),
         "artifacts": {
             "checkpoint": str(Path("best_model.pt")),
@@ -929,6 +1224,8 @@ def main():
             "model_metadata": str(model_artifacts_dir / "model_metadata.json"),
             "label_map": str(model_artifacts_dir / "label_map.json"),
             "case_index": str(metrics_dir / "case_index.csv"),
+            "train_case_index": str(metrics_dir / "train_case_index.csv"),
+            "validation_case_index": str(metrics_dir / "validation_case_index.csv"),
             "run_config": str(metrics_dir / "run_config.json"),
             "environment": str(metrics_dir / "environment.json"),
             "training_metrics_csv": str(metrics_file),

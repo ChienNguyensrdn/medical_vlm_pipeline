@@ -125,11 +125,12 @@ class MedicalVLMPipeline(nn.Module):
         all_embeddings = []
         all_case_ids = []
         all_metadata = []
+        model_device = next(self.parameters()).device
 
         logger.info("Extracting embeddings for vector index database...")
         with torch.no_grad():
             for batch in train_loader:
-                images = batch["image"]
+                images = batch["image"].to(model_device)
                 case_ids = batch["case_id"]
                 reports = batch["report_text"]
                 labels = batch["label"]

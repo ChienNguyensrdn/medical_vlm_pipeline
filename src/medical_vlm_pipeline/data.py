@@ -145,12 +145,65 @@ class MedicalCaseDataset(Dataset):
         return item
 
 
-def load_iu_chest_xray_cases(csv_path: str | Path, images_dir: str | Path) -> list[MedicalCase]:
+def infer_report_label(report_text: str) -> str:
+    """Infer a weak pathology label from IU Chest X-ray report text."""
+    text = report_text.lower()
+    rules = [
+        ("Pneumothorax", ("pneumothorax",)),
+        ("Pleural Effusion", ("pleural effusion", "effusions")),
+        ("Pneumonia", ("pneumonia", "consolidation", "infiltrate", "opacity")),
+        ("Cardiomegaly", ("cardiomegaly", "enlarged heart", "heart size is enlarged")),
+        ("Atelectasis", ("atelectasis",)),
+        ("Edema/Congestion", ("edema", "congestion", "vascular prominence", "pulmonary vascular")),
+        ("COPD/Hyperinflation", ("copd", "hyperinflation", "emphysema")),
+        ("Nodule/Mass", ("nodule", "mass", "lesion")),
+        ("Normal", ("normal chest", "no acute", "clear lungs", "lungs are clear")),
+    ]
+    for label, keywords in rules:
+        if any(keyword in text for keyword in keywords):
+            return label
+    return "Other"
+
+
+def choose_label_column(columns: Iterable[str], requested: str) -> str | None:
+    """Choose a usable label column from a cleaned IU CSV."""
+    columns_set = set(columns)
+    if requested != "auto":
+        return requested if requested in columns_set else None
+
+    preferred = (
+        "diagnosis",
+        "diagnoses",
+        "finding",
+        "findings",
+        "impression",
+        "disease",
+        "pathology",
+        "label",
+        "class",
+        "projection",
+    )
+    for candidate in preferred:
+        if candidate in columns_set:
+            return candidate
+    return None
+
+
+def load_iu_chest_xray_cases(
+    csv_path: str | Path,
+    images_dir: str | Path,
+    label_column: str = "projection",
+    derive_labels_from_report: bool = False,
+    min_class_count: int = 2,
+) -> list[MedicalCase]:
     """Helper to parse IU Chest X-ray cleaned_dataset.csv and load paired cases.
 
     Args:
         csv_path: Path to cleaned_dataset.csv.
         images_dir: Path to the specific resized folder (e.g. 'resized_images/256').
+        label_column: CSV column used as the classification target, or "auto".
+        derive_labels_from_report: Build weak pathology labels from report text.
+        min_class_count: Rare labels below this count are grouped into "Other".
     """
     import pandas as pd
     csv_path = Path(csv_path)
@@ -162,6 +215,17 @@ def load_iu_chest_xray_cases(csv_path: str | Path, images_dir: str | Path) -> li
 
     logger.info(f"Loading IU Chest X-ray cases from: {csv_path}")
     df = pd.read_csv(csv_path)
+
+    selected_label_column = choose_label_column(df.columns, label_column)
+    if derive_labels_from_report:
+        logger.info("Using weak pathology labels derived from org_caption text.")
+    elif selected_label_column is not None:
+        logger.info(f"Using CSV column '{selected_label_column}' as classification label.")
+    else:
+        logger.warning(
+            "Requested label column '%s' was not found. Falling back to projection labels.",
+            label_column,
+        )
 
     cases = []
     # Verify required columns are present
@@ -179,17 +243,41 @@ def load_iu_chest_xray_cases(csv_path: str | Path, images_dir: str | Path) -> li
 
         # Clean report text
         caption = str(row["org_caption"]) if not pd.isna(row["org_caption"]) else ""
-        projection = str(row["projection"]) if "projection" in df.columns and not pd.isna(row["projection"]) else "Frontal"
+        projection = (
+            str(row["projection"]) if "projection" in df.columns and not pd.isna(row["projection"])
+            else "Frontal"
+        )
+        if derive_labels_from_report:
+            label = infer_report_label(caption)
+        elif selected_label_column is not None and not pd.isna(row[selected_label_column]):
+            label = str(row[selected_label_column]).strip() or projection
+        else:
+            label = projection
 
         case = MedicalCase(
             case_id=image_id.split(".")[0],
             image_path=image_path,
             report_text=caption,
-            label=projection,  # Frontal/Lateral projection as label
+            label=label,
             modality="Chest X-ray",
         )
         cases.append(case)
 
+    if min_class_count > 1:
+        label_counts: dict[str, int] = {}
+        for case in cases:
+            label_counts[case.label or "Other"] = label_counts.get(case.label or "Other", 0) + 1
+        if any(count < min_class_count for count in label_counts.values()):
+            cases = [
+                MedicalCase(
+                    case_id=case.case_id,
+                    image_path=case.image_path,
+                    report_text=case.report_text,
+                    label=case.label if label_counts.get(case.label or "Other", 0) >= min_class_count else "Other",
+                    modality=case.modality,
+                )
+                for case in cases
+            ]
+
     logger.info(f"Successfully loaded {len(cases)} cases from IU Chest X-ray CSV.")
     return cases
-
