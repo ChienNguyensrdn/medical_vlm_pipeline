@@ -6,8 +6,10 @@ import sys
 import logging
 import argparse
 import csv
+import hashlib
 import json
 import platform
+import re
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -89,6 +91,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.15,
         help="Validation fraction. Use 0 to train without validation metrics.",
+    )
+    parser.add_argument(
+        "--split-group",
+        choices=["study", "report", "image"],
+        default="report",
+        help=(
+            "Validation grouping. Use study/report to prevent paired-view or repeated-report "
+            "leakage across train and validation."
+        ),
     )
     parser.add_argument(
         "--num-workers",
@@ -248,15 +259,27 @@ def retrieval_results_to_dict(results: list[Any]) -> list[dict[str, Any]]:
     ]
 
 
-def write_case_index(path: Path, cases: list[MedicalCase]) -> None:
+def write_case_index(path: Path, cases: list[MedicalCase], split_group: str = "report") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, mode="w", newline="", encoding="utf-8") as f:
-        fieldnames = ["case_id", "image_path", "label", "modality", "report_text"]
+        fieldnames = [
+            "case_id",
+            "study_id",
+            "report_id",
+            "group_id",
+            "image_path",
+            "label",
+            "modality",
+            "report_text",
+        ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for case in cases:
             writer.writerow({
                 "case_id": case.case_id,
+                "study_id": case_group_key(case, "study"),
+                "report_id": case_group_key(case, "report"),
+                "group_id": case_group_key(case, split_group),
                 "image_path": str(case.image_path),
                 "label": case.label,
                 "modality": case.modality,
@@ -264,34 +287,110 @@ def write_case_index(path: Path, cases: list[MedicalCase]) -> None:
             })
 
 
+def normalize_report_key(report_text: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(report_text or "").lower()).strip()
+    return hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+
+
+def case_group_key(case: MedicalCase, split_group: str) -> str:
+    """Build a stable group id for leak-safe validation splitting."""
+    if split_group == "image":
+        return case.case_id
+    if split_group == "report":
+        return normalize_report_key(case.report_text)
+
+    # IU image ids usually append projection/view suffixes like -0001, -1001, -2001.
+    study_id = re.sub(r"-\d{4}(?:-\d{4})?$", "", case.case_id)
+    return study_id or normalize_report_key(case.report_text) or case.case_id
+
+
+def split_diagnostics(
+    train_cases: list[MedicalCase],
+    val_cases: list[MedicalCase],
+    split_group: str,
+) -> dict[str, Any]:
+    train_groups = {case_group_key(case, split_group) for case in train_cases}
+    val_groups = {case_group_key(case, split_group) for case in val_cases}
+    shared_groups = train_groups & val_groups
+    return {
+        "split_group": split_group,
+        "num_train_groups": len(train_groups),
+        "num_validation_groups": len(val_groups),
+        "shared_groups": len(shared_groups),
+        "train_images_in_shared_groups": sum(
+            1 for case in train_cases if case_group_key(case, split_group) in shared_groups
+        ),
+        "validation_images_in_shared_groups": sum(
+            1 for case in val_cases if case_group_key(case, split_group) in shared_groups
+        ),
+    }
+
+
+def fallback_random_group_split(
+    cases: list[MedicalCase],
+    groups: list[str],
+    val_split: float,
+    seed: int,
+) -> tuple[list[int], list[int]]:
+    unique_groups = sorted(set(groups))
+    generator = torch.Generator().manual_seed(seed)
+    order = torch.randperm(len(unique_groups), generator=generator).tolist()
+    val_group_count = max(1, int(round(len(unique_groups) * val_split)))
+    val_groups = {unique_groups[idx] for idx in order[:val_group_count]}
+    train_idx = [idx for idx, group in enumerate(groups) if group not in val_groups]
+    val_idx = [idx for idx, group in enumerate(groups) if group in val_groups]
+    return train_idx, val_idx
+
+
 def split_cases(
     cases: list[MedicalCase],
     val_split: float,
     seed: int = 42,
+    split_group: str = "study",
 ) -> tuple[list[MedicalCase], list[MedicalCase]]:
-    """Create a deterministic stratified train/validation split when possible."""
+    """Create a deterministic train/validation split, grouped to avoid leakage."""
     if val_split <= 0 or len(cases) < 4:
         return cases, []
     val_split = min(max(val_split, 0.0), 0.5)
     indices = list(range(len(cases)))
     labels = [case.label or "Other" for case in cases]
-    try:
-        from sklearn.model_selection import train_test_split
+    groups = [case_group_key(case, split_group) for case in cases]
+    if split_group == "image":
+        groups = [str(idx) for idx in indices]
 
-        train_idx, val_idx = train_test_split(
-            indices,
-            test_size=val_split,
-            random_state=seed,
-            shuffle=True,
-            stratify=labels,
-        )
+    try:
+        from sklearn.model_selection import StratifiedGroupKFold, train_test_split
+
+        if split_group == "image":
+            train_idx, val_idx = train_test_split(
+                indices,
+                test_size=val_split,
+                random_state=seed,
+                shuffle=True,
+                stratify=labels,
+            )
+        else:
+            label_group_counts: dict[str, set[str]] = {}
+            for label, group in zip(labels, groups):
+                label_group_counts.setdefault(label, set()).add(group)
+            min_label_groups = min(len(group_set) for group_set in label_group_counts.values())
+            n_splits = min(max(2, int(round(1.0 / val_split))), min_label_groups)
+            if n_splits < 2:
+                raise ValueError("Not enough groups per class for stratified grouped split.")
+            splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+            train_idx, val_idx = next(splitter.split(indices, labels, groups))
+            train_idx = list(train_idx)
+            val_idx = list(val_idx)
     except Exception as exc:
-        logger.warning("Stratified split failed (%s). Falling back to random split.", exc)
-        generator = torch.Generator().manual_seed(seed)
-        permuted = torch.randperm(len(cases), generator=generator).tolist()
-        val_size = max(1, int(round(len(cases) * val_split)))
-        val_idx = permuted[:val_size]
-        train_idx = permuted[val_size:]
+        logger.warning("Stratified split failed (%s). Falling back to random grouped split.", exc)
+        if split_group == "image":
+            generator = torch.Generator().manual_seed(seed)
+            permuted = torch.randperm(len(cases), generator=generator).tolist()
+            val_size = max(1, int(round(len(cases) * val_split)))
+            val_idx = permuted[:val_size]
+            train_idx = permuted[val_size:]
+        else:
+            train_idx, val_idx = fallback_random_group_split(cases, groups, val_split, seed)
     return [cases[i] for i in train_idx], [cases[i] for i in val_idx]
 
 
@@ -686,15 +785,22 @@ def main():
         logger.error("No training cases loaded. Exiting.")
         sys.exit(1)
 
-    train_cases, val_cases = split_cases(all_cases, args.val_split)
+    train_cases, val_cases = split_cases(
+        all_cases,
+        args.val_split,
+        split_group=args.split_group,
+    )
     if not train_cases:
         logger.error("No training cases remain after splitting. Exiting.")
         sys.exit(1)
+    split_info = split_diagnostics(train_cases, val_cases, args.split_group)
     logger.info(
-        "Dataset split: %d train / %d validation cases (val_split=%.2f)",
+        "Dataset split: %d train / %d validation cases (val_split=%.2f, split_group=%s, shared_groups=%d)",
         len(train_cases),
         len(val_cases),
         args.val_split,
+        args.split_group,
+        split_info["shared_groups"],
     )
 
     write_json(metrics_dir / "environment.json", environment_snapshot(device))
@@ -715,6 +821,8 @@ def main():
                 "num_validation_cases": len(val_cases),
                 "target_column": args.target_column,
                 "derive_labels_from_report": args.derive_labels_from_report,
+                "split_group": args.split_group,
+                "split_diagnostics": split_info,
                 "label_counts": count_values([case.label or "" for case in all_cases]),
                 "train_label_counts": count_values([case.label or "" for case in train_cases]),
                 "validation_label_counts": count_values([case.label or "" for case in val_cases]),
@@ -724,10 +832,10 @@ def main():
             "environment": environment_snapshot(device),
         },
     )
-    write_case_index(metrics_dir / "case_index.csv", all_cases)
-    write_case_index(metrics_dir / "train_case_index.csv", train_cases)
+    write_case_index(metrics_dir / "case_index.csv", all_cases, args.split_group)
+    write_case_index(metrics_dir / "train_case_index.csv", train_cases, args.split_group)
     if val_cases:
-        write_case_index(metrics_dir / "validation_case_index.csv", val_cases)
+        write_case_index(metrics_dir / "validation_case_index.csv", val_cases, args.split_group)
 
     # 3. Instantiate Tokenizer & Wrapper
     # Use fallback Bidirectional LSTM or HuggingFace Tokenizer
@@ -1184,6 +1292,8 @@ def main():
             "num_validation_cases": len(val_cases),
             "target_column": args.target_column,
             "derive_labels_from_report": args.derive_labels_from_report,
+            "split_group": args.split_group,
+            "split_diagnostics": split_info,
             "best_loss": best_loss,
             "best_metric_name": best_metric_name,
             "artifacts": {
@@ -1344,6 +1454,8 @@ def main():
         "num_validation_cases": len(val_cases),
         "target_column": args.target_column,
         "derive_labels_from_report": args.derive_labels_from_report,
+        "split_group": args.split_group,
+        "split_diagnostics": split_info,
         "class_weighting": args.class_weighting,
         "class_weights": class_weights_by_label,
         "device": str(device),
