@@ -79,6 +79,12 @@ def parse_args() -> argparse.Namespace:
         help="Group labels with fewer than this many examples into Other.",
     )
     parser.add_argument(
+        "--class-weighting",
+        choices=["balanced", "none"],
+        default="balanced",
+        help="Classification loss weighting strategy for imbalanced weak labels.",
+    )
+    parser.add_argument(
         "--val-split",
         type=float,
         default=0.15,
@@ -297,12 +303,31 @@ def labels_to_tensor(labels: list[str], label_to_idx: dict[str, int], device: to
     )
 
 
+def compute_class_weights(
+    cases: list[MedicalCase],
+    label_to_idx: dict[str, int],
+    device: torch.device,
+    max_weight: float = 5.0,
+) -> torch.Tensor:
+    """Compute normalized inverse-frequency class weights from the training split."""
+    counts = torch.zeros(len(label_to_idx), dtype=torch.float32)
+    for case in cases:
+        label = case.label or "Other"
+        counts[label_to_idx.get(label, label_to_idx.get("Other", 0))] += 1.0
+
+    weights = counts.sum() / (len(label_to_idx) * counts.clamp_min(1.0))
+    weights = weights.clamp(max=max_weight)
+    weights = weights / weights.mean().clamp_min(1e-6)
+    return weights.to(device)
+
+
 def evaluate_loader(
     pipeline: MedicalVLMPipeline,
     loader: DataLoader,
     label_to_idx: dict[str, int],
     class_names: list[str],
     device: torch.device,
+    classification_criterion: nn.Module,
     use_contrastive: bool = True,
 ) -> dict[str, Any]:
     """Evaluate classification and optional contrastive losses on a loader."""
@@ -320,7 +345,7 @@ def evaluate_loader(
             labels = batch["label"]
             label_idxs = labels_to_tensor(labels, label_to_idx, device)
             logits = pipeline(images)
-            class_loss = nn.CrossEntropyLoss()(logits, label_idxs)
+            class_loss = classification_criterion(logits, label_idxs)
 
             if use_contrastive and "input_ids" in batch:
                 input_ids = batch["input_ids"].to(device, non_blocking=device.type == "cuda")
@@ -350,6 +375,9 @@ def evaluate_loader(
         "precision": 0.0,
         "recall": 0.0,
         "f1_score": 0.0,
+        "macro_precision": 0.0,
+        "macro_recall": 0.0,
+        "macro_f1_score": 0.0,
         "per_class_metrics": {},
         "confusion_matrix": [],
     }
@@ -369,6 +397,15 @@ def evaluate_loader(
         metrics["precision"] = float(precision)
         metrics["recall"] = float(recall)
         metrics["f1_score"] = float(f1)
+        macro_precision, macro_recall, macro_f1, _ = precision_recall_fscore_support(
+            all_targets,
+            all_preds,
+            average="macro",
+            zero_division=0,
+        )
+        metrics["macro_precision"] = float(macro_precision)
+        metrics["macro_recall"] = float(macro_recall)
+        metrics["macro_f1_score"] = float(macro_f1)
         class_precision, class_recall, class_f1, class_support = precision_recall_fscore_support(
             all_targets,
             all_preds,
@@ -393,7 +430,15 @@ def evaluate_loader(
     except ImportError:
         correct = sum(1 for pred, target in zip(all_preds, all_targets) if pred == target)
         accuracy = correct / len(all_targets)
-        metrics.update({"accuracy": accuracy, "precision": accuracy, "recall": accuracy, "f1_score": accuracy})
+        metrics.update({
+            "accuracy": accuracy,
+            "precision": accuracy,
+            "recall": accuracy,
+            "f1_score": accuracy,
+            "macro_precision": accuracy,
+            "macro_recall": accuracy,
+            "macro_f1_score": accuracy,
+        })
     return metrics
 
 
@@ -409,6 +454,7 @@ def save_training_checkpoint(
     label_to_idx: dict[str, int],
     epoch_records: list[dict[str, Any]],
     dataset_source: str,
+    class_weights: dict[str, float] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {
@@ -420,6 +466,7 @@ def save_training_checkpoint(
         "config": to_jsonable(asdict(config)),
         "class_names": class_names,
         "label_to_idx": label_to_idx,
+        "class_weights": class_weights or {},
         "epoch_records": to_jsonable(epoch_records),
         "dataset_source": dataset_source,
     }
@@ -538,6 +585,11 @@ def plot_training_metrics(csv_path: Path, output_path: Path):
         if f1_vals.max() <= 1.0:
             f1_vals = f1_vals * 100
         axes[1].plot(df["epoch"], f1_vals, label="F1-Score (%)", color="#ff7f0e", linewidth=2.5)
+        if "macro_f1_score" in df.columns and df["macro_f1_score"].notna().any():
+            macro_f1_vals = df["macro_f1_score"]
+            if macro_f1_vals.max() <= 1.0:
+                macro_f1_vals = macro_f1_vals * 100
+            axes[1].plot(df["epoch"], macro_f1_vals, label="Macro F1 (%)", color="#2ca02c", linewidth=2.0)
         if "val_accuracy" in df.columns and df["val_accuracy"].notna().any():
             axes[1].plot(df["epoch"], df["val_accuracy"] * 100, label="Val Accuracy (%)", color="#8c564b", linewidth=2.0)
         if "val_f1_score" in df.columns and df["val_f1_score"].notna().any():
@@ -545,6 +597,11 @@ def plot_training_metrics(csv_path: Path, output_path: Path):
             if val_f1_vals.max() <= 1.0:
                 val_f1_vals = val_f1_vals * 100
             axes[1].plot(df["epoch"], val_f1_vals, label="Val F1-Score (%)", color="#17becf", linewidth=2.0)
+        if "val_macro_f1_score" in df.columns and df["val_macro_f1_score"].notna().any():
+            val_macro_f1_vals = df["val_macro_f1_score"]
+            if val_macro_f1_vals.max() <= 1.0:
+                val_macro_f1_vals = val_macro_f1_vals * 100
+            axes[1].plot(df["epoch"], val_macro_f1_vals, label="Val Macro F1 (%)", color="#bcbd22", linewidth=2.0)
         
         axes[1].set_title("Classification Performance Metrics", fontsize=14, fontweight="bold", pad=12)
         axes[1].set_xlabel("Epoch", fontsize=12)
@@ -766,6 +823,24 @@ def main():
 
     epoch_records: list[dict[str, Any]] = []
     label_to_idx = {name: idx for idx, name in enumerate(class_names)}
+    class_weights_tensor = (
+        compute_class_weights(train_cases, label_to_idx, device)
+        if args.class_weighting == "balanced"
+        else None
+    )
+    classification_criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
+    class_weights_by_label = (
+        {
+            class_name: float(class_weights_tensor[label_to_idx[class_name]].detach().cpu().item())
+            for class_name in class_names
+        }
+        if class_weights_tensor is not None
+        else {}
+    )
+    if class_weights_by_label:
+        logger.info("Using balanced class weights: %s", class_weights_by_label)
+    else:
+        logger.info("Class weighting disabled.")
     best_metric_name = "val_total_loss" if val_loader is not None else "total_loss"
     write_json(
         model_artifacts_dir / "label_map.json",
@@ -773,6 +848,8 @@ def main():
             "class_names": class_names,
             "label_to_idx": label_to_idx,
             "idx_to_label": {idx: label for label, idx in label_to_idx.items()},
+            "class_weighting": args.class_weighting,
+            "class_weights": class_weights_by_label,
         },
     )
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and not args.no_amp)
@@ -802,7 +879,7 @@ def main():
             with torch.amp.autocast("cuda", enabled=device.type == "cuda" and not args.no_amp):
                 # A. Classification Loss via forward
                 classification_logits = pipeline(images)
-                classification_loss = nn.CrossEntropyLoss()(classification_logits, label_idxs)
+                classification_loss = classification_criterion(classification_logits, label_idxs)
 
                 # B. Cross-modal Contrastive Loss via embeddings
                 # For InfoNCE, we require tokenized input_ids
@@ -843,9 +920,23 @@ def main():
         avg_contrastive = epoch_contrastive / num_batches
         avg_class = epoch_class / num_batches
 
-        train_eval = evaluate_loader(pipeline, train_loader, label_to_idx, class_names, device)
+        train_eval = evaluate_loader(
+            pipeline,
+            train_loader,
+            label_to_idx,
+            class_names,
+            device,
+            classification_criterion,
+        )
         val_eval = (
-            evaluate_loader(pipeline, val_loader, label_to_idx, class_names, device)
+            evaluate_loader(
+                pipeline,
+                val_loader,
+                label_to_idx,
+                class_names,
+                device,
+                classification_criterion,
+            )
             if val_loader is not None
             else None
         )
@@ -865,6 +956,9 @@ def main():
             "precision": train_eval["precision"],
             "recall": train_eval["recall"],
             "f1_score": train_eval["f1_score"],
+            "macro_precision": train_eval["macro_precision"],
+            "macro_recall": train_eval["macro_recall"],
+            "macro_f1_score": train_eval["macro_f1_score"],
             "eval_total_loss": train_eval["total_loss"],
             "eval_contrastive_loss": train_eval["contrastive_loss"],
             "eval_classification_loss": train_eval["classification_loss"],
@@ -875,6 +969,9 @@ def main():
             "val_precision": val_eval["precision"] if val_eval is not None else None,
             "val_recall": val_eval["recall"] if val_eval is not None else None,
             "val_f1_score": val_eval["f1_score"] if val_eval is not None else None,
+            "val_macro_precision": val_eval["macro_precision"] if val_eval is not None else None,
+            "val_macro_recall": val_eval["macro_recall"] if val_eval is not None else None,
+            "val_macro_f1_score": val_eval["macro_f1_score"] if val_eval is not None else None,
             "learning_rate_start": learning_rate_start,
             "learning_rate": learning_rate_end,
             "epoch_duration_sec": epoch_duration_sec,
@@ -886,6 +983,8 @@ def main():
             "is_best": is_best,
             "best_loss_before_epoch": best_loss,
             "best_metric_name": best_metric_name,
+            "class_weighting": args.class_weighting,
+            "class_weights": class_weights_by_label,
             "per_class_metrics": train_eval["per_class_metrics"],
             "confusion_matrix": train_eval["confusion_matrix"],
             "validation_per_class_metrics": val_eval["per_class_metrics"] if val_eval is not None else {},
@@ -907,6 +1006,9 @@ def main():
                     "precision",
                     "recall",
                     "f1_score",
+                    "macro_precision",
+                    "macro_recall",
+                    "macro_f1_score",
                     "eval_total_loss",
                     "eval_contrastive_loss",
                     "eval_classification_loss",
@@ -917,6 +1019,9 @@ def main():
                     "val_precision",
                     "val_recall",
                     "val_f1_score",
+                    "val_macro_precision",
+                    "val_macro_recall",
+                    "val_macro_f1_score",
                     "learning_rate_start",
                     "learning_rate",
                     "epoch_duration_sec",
@@ -950,6 +1055,9 @@ def main():
                 f"{train_eval['precision']:.6f}",
                 f"{train_eval['recall']:.6f}",
                 f"{train_eval['f1_score']:.6f}",
+                f"{train_eval['macro_precision']:.6f}",
+                f"{train_eval['macro_recall']:.6f}",
+                f"{train_eval['macro_f1_score']:.6f}",
                 f"{train_eval['total_loss']:.6f}",
                 f"{train_eval['contrastive_loss']:.6f}",
                 f"{train_eval['classification_loss']:.6f}",
@@ -960,6 +1068,9 @@ def main():
                 f"{val_eval['precision']:.6f}" if val_eval is not None else "",
                 f"{val_eval['recall']:.6f}" if val_eval is not None else "",
                 f"{val_eval['f1_score']:.6f}" if val_eval is not None else "",
+                f"{val_eval['macro_precision']:.6f}" if val_eval is not None else "",
+                f"{val_eval['macro_recall']:.6f}" if val_eval is not None else "",
+                f"{val_eval['macro_f1_score']:.6f}" if val_eval is not None else "",
                 f"{learning_rate_start:.8f}",
                 f"{learning_rate_end:.8f}",
                 f"{epoch_duration_sec:.4f}",
@@ -1025,6 +1136,7 @@ def main():
                 label_to_idx=label_to_idx,
                 epoch_records=epoch_records,
                 dataset_source=dataset_source,
+                class_weights=class_weights_by_label,
             )
             logger.info(f"New best model saved successfully to: {checkpoint_path}")
 
@@ -1055,6 +1167,7 @@ def main():
         label_to_idx=label_to_idx,
         epoch_records=epoch_records,
         dataset_source=dataset_source,
+        class_weights=class_weights_by_label,
     )
     write_json(
         model_artifacts_dir / "model_metadata.json",
@@ -1063,6 +1176,8 @@ def main():
             "config": asdict(config),
             "class_names": class_names,
             "label_to_idx": label_to_idx,
+            "class_weighting": args.class_weighting,
+            "class_weights": class_weights_by_label,
             "dataset_source": dataset_source,
             "num_cases": len(all_cases),
             "num_train_cases": len(train_cases),
@@ -1229,6 +1344,8 @@ def main():
         "num_validation_cases": len(val_cases),
         "target_column": args.target_column,
         "derive_labels_from_report": args.derive_labels_from_report,
+        "class_weighting": args.class_weighting,
+        "class_weights": class_weights_by_label,
         "device": str(device),
         "artifacts": {
             "checkpoint": str(Path("best_model.pt")),

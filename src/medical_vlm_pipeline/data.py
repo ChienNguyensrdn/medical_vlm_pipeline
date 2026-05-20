@@ -1,6 +1,7 @@
 """Dataset interfaces for paired medical images and reports."""
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Callable, Any
@@ -145,23 +146,95 @@ class MedicalCaseDataset(Dataset):
         return item
 
 
+_PATHOLOGY_RULES = [
+    ("Pneumothorax", ("pneumothorax",)),
+    ("Pleural Effusion", ("pleural effusion", "effusion", "effusions")),
+    ("Pneumonia", ("pneumonia", "consolidation", "infiltrate", "infiltration", "opacity")),
+    ("Cardiomegaly", ("cardiomegaly", "enlarged heart", "heart size is enlarged")),
+    ("Atelectasis", ("atelectasis",)),
+    ("Edema/Congestion", ("edema", "congestion", "vascular prominence", "pulmonary vascular")),
+    ("COPD/Hyperinflation", ("copd", "hyperinflation", "emphysema")),
+    ("Nodule/Mass", ("nodule", "mass", "lesion")),
+]
+_NORMAL_KEYWORDS = (
+    "normal chest",
+    "no acute",
+    "no active",
+    "clear lungs",
+    "lungs are clear",
+    "unremarkable",
+)
+_NEGATION_CUE_RE = re.compile(
+    r"\b("
+    r"no|not|without|negative for|free of|absence of|"
+    r"no evidence of|without evidence of|no focal|no acute"
+    r")\b"
+)
+_POST_NEGATION_RE = re.compile(
+    r"\b("
+    r"is not seen|are not seen|not seen|not identified|not visualized|"
+    r"not present|not evident|absent|resolved"
+    r")\b"
+)
+_CONTRAST_RE = re.compile(r"\b(but|however|although|though|nevertheless)\b")
+
+
+def _normalize_report_text(report_text: str) -> str:
+    return re.sub(r"\s+", " ", str(report_text or "").lower()).strip()
+
+
+def _keyword_pattern(keyword: str) -> re.Pattern[str]:
+    escaped = re.escape(keyword).replace(r"\ ", r"\s+")
+    return re.compile(rf"\b{escaped}\b")
+
+
+def _is_negated(text: str, start: int, end: int) -> bool:
+    """Detect common radiology negation around a matched pathology keyword."""
+    sentence_start = max(text.rfind(".", 0, start), text.rfind(";", 0, start), text.rfind("\n", 0, start))
+    left_context = text[sentence_start + 1:start][-120:]
+    for cue in _NEGATION_CUE_RE.finditer(left_context):
+        if not _CONTRAST_RE.search(left_context[cue.end():]):
+            return True
+
+    right_context = text[end:end + 80]
+    return bool(_POST_NEGATION_RE.search(right_context))
+
+
+def _has_affirmed_keyword(text: str, keywords: tuple[str, ...]) -> bool:
+    for keyword in keywords:
+        for match in _keyword_pattern(keyword).finditer(text):
+            if not _is_negated(text, match.start(), match.end()):
+                return True
+    return False
+
+
+def _has_pathology_mention(text: str) -> bool:
+    return any(
+        _keyword_pattern(keyword).search(text) is not None
+        for _, keywords in _PATHOLOGY_RULES
+        for keyword in keywords
+    )
+
+
 def infer_report_label(report_text: str) -> str:
-    """Infer a weak pathology label from IU Chest X-ray report text."""
-    text = report_text.lower()
-    rules = [
-        ("Pneumothorax", ("pneumothorax",)),
-        ("Pleural Effusion", ("pleural effusion", "effusions")),
-        ("Pneumonia", ("pneumonia", "consolidation", "infiltrate", "opacity")),
-        ("Cardiomegaly", ("cardiomegaly", "enlarged heart", "heart size is enlarged")),
-        ("Atelectasis", ("atelectasis",)),
-        ("Edema/Congestion", ("edema", "congestion", "vascular prominence", "pulmonary vascular")),
-        ("COPD/Hyperinflation", ("copd", "hyperinflation", "emphysema")),
-        ("Nodule/Mass", ("nodule", "mass", "lesion")),
-        ("Normal", ("normal chest", "no acute", "clear lungs", "lungs are clear")),
-    ]
-    for label, keywords in rules:
-        if any(keyword in text for keyword in keywords):
+    """Infer a weak pathology label from IU Chest X-ray report text.
+
+    The IU reports frequently list absent findings, e.g. "no pleural effusion or
+    pneumothorax". Treating those as positive labels collapses training, so this
+    weak labeler skips common negated pathology mentions.
+    """
+    text = _normalize_report_text(report_text)
+    if not text:
+        return "Other"
+
+    for label, keywords in _PATHOLOGY_RULES:
+        if _has_affirmed_keyword(text, keywords):
             return label
+
+    if any(keyword in text for keyword in _NORMAL_KEYWORDS):
+        return "Normal"
+    if _has_pathology_mention(text) and _NEGATION_CUE_RE.search(text):
+        return "Normal"
     return "Other"
 
 
