@@ -96,6 +96,11 @@ def parse_args() -> argparse.Namespace:
         help="Disable CUDA automatic mixed precision.",
     )
     parser.add_argument(
+        "--allow-device-fallback",
+        action="store_true",
+        help="Allow explicit cuda/mps requests to fall back to CPU. By default explicit accelerator requests fail fast.",
+    )
+    parser.add_argument(
         "--synthetic-cases",
         type=int,
         default=32,
@@ -211,7 +216,7 @@ def environment_snapshot(device: torch.device) -> dict[str, Any]:
     snapshot = {
         "python": platform.python_version(),
         "platform": platform.platform(),
-        "torch": torch.__version__,
+        "torch": str(torch.__version__),
         "device": str(device),
         "cuda_available": torch.cuda.is_available(),
         "cuda_version": torch.version.cuda,
@@ -574,9 +579,20 @@ def main():
     configure_torch_runtime(device)
     logger.info(f"Using training accelerator device: {device}")
     if args.device == "cuda" and device.type != "cuda":
-        logger.warning("CUDA was requested but failed availability/smoke checks; falling back to CPU.")
+        message = "CUDA was requested but failed availability/smoke checks; refusing to run on CPU."
+        if args.allow_device_fallback:
+            logger.warning("%s --allow-device-fallback is set, continuing on CPU.", message)
+        else:
+            logger.error(message)
+            logger.error("Check the CUDA smoke-test warning above and reinstall a T4-compatible PyTorch wheel.")
+            sys.exit(2)
     if args.device == "mps" and device.type != "mps":
-        logger.warning("Apple MPS was requested but is not available in this Python/PyTorch environment.")
+        message = "Apple MPS was requested but is not available in this Python/PyTorch environment."
+        if args.allow_device_fallback:
+            logger.warning("%s --allow-device-fallback is set, continuing on CPU.", message)
+        else:
+            logger.error(message)
+            sys.exit(2)
 
     # Initialize metrics folder and durable run metadata early.
     metrics_dir = Path("report_kaggle")
