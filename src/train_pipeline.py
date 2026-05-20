@@ -108,6 +108,17 @@ def parse_args() -> argparse.Namespace:
         help="DataLoader workers. Kaggle T4 usually works well with 2.",
     )
     parser.add_argument(
+        "--multi-gpu",
+        choices=["auto", "data_parallel", "off"],
+        default="auto",
+        help="Use torch.nn.DataParallel across CUDA GPUs when available.",
+    )
+    parser.add_argument(
+        "--gpu-ids",
+        default="",
+        help="Comma-separated CUDA device ids for DataParallel, e.g. '0,1'. Empty means all GPUs.",
+    )
+    parser.add_argument(
         "--no-amp",
         action="store_true",
         help="Disable CUDA automatic mixed precision.",
@@ -245,6 +256,112 @@ def environment_snapshot(device: torch.device) -> dict[str, Any]:
             torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())
         ]
     return snapshot
+
+
+def parse_gpu_ids(gpu_ids: str) -> list[int] | None:
+    if not gpu_ids.strip():
+        return None
+    return [int(item.strip()) for item in gpu_ids.split(",") if item.strip()]
+
+
+def configure_multi_gpu(
+    pipeline: MedicalVLMPipeline,
+    device: torch.device,
+    mode: str,
+    gpu_ids: str = "",
+) -> tuple[MedicalVLMPipeline, dict[str, Any]]:
+    """Wrap heavy encoders with DataParallel for simple multi-GPU Kaggle runs."""
+    info: dict[str, Any] = {
+        "requested_mode": mode,
+        "enabled": False,
+        "strategy": "single_device",
+        "device_ids": [],
+        "primary_device": str(device),
+        "reason": "",
+    }
+    if mode == "off":
+        info["reason"] = "multi_gpu disabled by config"
+        return pipeline, info
+    if device.type != "cuda":
+        info["reason"] = "selected device is not CUDA"
+        return pipeline, info
+    if torch.cuda.device_count() < 2:
+        info["reason"] = "fewer than 2 CUDA devices visible"
+        return pipeline, info
+
+    requested_ids = parse_gpu_ids(gpu_ids)
+    candidate_ids = requested_ids if requested_ids is not None else list(range(torch.cuda.device_count()))
+    candidate_ids = [idx for idx in candidate_ids if 0 <= idx < torch.cuda.device_count()]
+    usable_ids = [
+        idx
+        for idx in candidate_ids
+        if is_device_usable(torch.device(f"cuda:{idx}"))
+    ]
+    if len(usable_ids) < 2:
+        info["reason"] = f"fewer than 2 requested CUDA devices passed smoke tests: {usable_ids}"
+        return pipeline, info
+
+    primary = usable_ids[0]
+    torch.cuda.set_device(primary)
+    pipeline.image_encoder = nn.DataParallel(
+        pipeline.image_encoder,
+        device_ids=usable_ids,
+        output_device=primary,
+    )
+    pipeline.text_encoder = nn.DataParallel(
+        pipeline.text_encoder,
+        device_ids=usable_ids,
+        output_device=primary,
+    )
+    info.update({
+        "enabled": True,
+        "strategy": "encoder_data_parallel",
+        "device_ids": usable_ids,
+        "primary_device": f"cuda:{primary}",
+        "gpu_names": [torch.cuda.get_device_name(idx) for idx in usable_ids],
+        "reason": "image_encoder and text_encoder wrapped with DataParallel",
+    })
+    logger.info(
+        "Multi-GPU enabled with DataParallel on CUDA devices %s: %s",
+        usable_ids,
+        info["gpu_names"],
+    )
+    return pipeline, info
+
+
+def clean_state_dict_for_save(model: nn.Module) -> dict[str, Any]:
+    """Remove DataParallel prefixes from saved weights for easier reuse."""
+    cleaned = {}
+    for key, value in model.state_dict().items():
+        clean_key = key
+        if clean_key.startswith("module."):
+            clean_key = clean_key[len("module."):]
+        clean_key = clean_key.replace("image_encoder.module.", "image_encoder.")
+        clean_key = clean_key.replace("text_encoder.module.", "text_encoder.")
+        cleaned[clean_key] = value
+    return cleaned
+
+
+def adapt_state_dict_for_model(model: nn.Module, state_dict: dict[str, Any]) -> dict[str, Any]:
+    """Add DataParallel prefixes back when loading clean weights into wrapped encoders."""
+    target_keys = set(model.state_dict().keys())
+    adapted = {}
+    for key, value in state_dict.items():
+        candidates = [key]
+        if key.startswith("image_encoder."):
+            candidates.append("image_encoder.module." + key[len("image_encoder."):])
+        if key.startswith("text_encoder."):
+            candidates.append("text_encoder.module." + key[len("text_encoder."):])
+        if "module." + key in target_keys:
+            candidates.append("module." + key)
+        adapted_key = next((candidate for candidate in candidates if candidate in target_keys), key)
+        adapted[adapted_key] = value
+    return adapted
+
+
+def load_model_state(path: Path, model: nn.Module, device: torch.device) -> None:
+    state_dict = torch.load(path, map_location=device)
+    model.load_state_dict(adapt_state_dict_for_model(model, state_dict))
 
 
 def retrieval_results_to_dict(results: list[Any]) -> list[dict[str, Any]]:
@@ -554,18 +671,20 @@ def save_training_checkpoint(
     epoch_records: list[dict[str, Any]],
     dataset_source: str,
     class_weights: dict[str, float] | None = None,
+    multi_gpu: dict[str, Any] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {
         "epoch": epoch,
         "best_loss": best_loss,
-        "model_state_dict": pipeline.state_dict(),
+        "model_state_dict": clean_state_dict_for_save(pipeline),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
         "config": to_jsonable(asdict(config)),
         "class_names": class_names,
         "label_to_idx": label_to_idx,
         "class_weights": class_weights or {},
+        "multi_gpu": multi_gpu or {},
         "epoch_records": to_jsonable(epoch_records),
         "dataset_source": dataset_source,
     }
@@ -905,6 +1024,19 @@ def main():
     logger.info("Instantiating End-to-End Multimodal VLM Pipeline...")
     pipeline = MedicalVLMPipeline(config, num_classes=num_classes, class_names=class_names)
     pipeline = pipeline.to(device)
+    pipeline, multi_gpu_info = configure_multi_gpu(
+        pipeline,
+        device=device,
+        mode=args.multi_gpu,
+        gpu_ids=args.gpu_ids,
+    )
+    write_json(
+        metrics_dir / "environment.json",
+        {
+            **environment_snapshot(device),
+            "multi_gpu": multi_gpu_info,
+        },
+    )
 
     # 5. Define Optimizers & Schedulers
     # Separate parameters into encoder/heads for customized learning rates if needed
@@ -1088,6 +1220,8 @@ def main():
             "num_validation_samples": len(val_dataset) if val_dataset is not None else 0,
             "batch_size": config.training.batch_size,
             "device": str(device),
+            "multi_gpu_strategy": multi_gpu_info["strategy"],
+            "multi_gpu_device_ids": multi_gpu_info["device_ids"],
             "is_best": is_best,
             "best_loss_before_epoch": best_loss,
             "best_metric_name": best_metric_name,
@@ -1138,6 +1272,8 @@ def main():
                     "num_validation_samples",
                     "batch_size",
                     "device",
+                    "multi_gpu_strategy",
+                    "multi_gpu_device_ids_json",
                     "is_best",
                     "best_loss_before_epoch",
                     "best_metric_name",
@@ -1187,6 +1323,8 @@ def main():
                 len(val_dataset) if val_dataset is not None else 0,
                 config.training.batch_size,
                 str(device),
+                multi_gpu_info["strategy"],
+                json.dumps(multi_gpu_info["device_ids"]),
                 int(is_best),
                 f"{best_loss:.6f}",
                 best_metric_name,
@@ -1230,8 +1368,8 @@ def main():
         if is_best:
             best_loss = selection_loss
             checkpoint_path = Path("best_model.pt")
-            torch.save(pipeline.state_dict(), checkpoint_path)
-            torch.save(pipeline.state_dict(), model_artifacts_dir / "best_model_state_dict.pt")
+            torch.save(clean_state_dict_for_save(pipeline), checkpoint_path)
+            torch.save(clean_state_dict_for_save(pipeline), model_artifacts_dir / "best_model_state_dict.pt")
             save_training_checkpoint(
                 model_artifacts_dir / "best_training_checkpoint.pt",
                 pipeline=pipeline,
@@ -1245,6 +1383,7 @@ def main():
                 epoch_records=epoch_records,
                 dataset_source=dataset_source,
                 class_weights=class_weights_by_label,
+                multi_gpu=multi_gpu_info,
             )
             logger.info(f"New best model saved successfully to: {checkpoint_path}")
 
@@ -1255,14 +1394,14 @@ def main():
 
     # Load best checkpoint weights
     if os.path.exists("best_model.pt"):
-        pipeline.load_state_dict(torch.load("best_model.pt"))
+        load_model_state(Path("best_model.pt"), pipeline, device)
         logger.info("Loaded best finetuned model weights successfully.")
 
     # Rebuild optimized Quantized index
     pipeline.build_vector_index(train_loader)
     retriever_index_base = model_artifacts_dir / "retriever_index" / "faiss_retriever"
     pipeline.retriever.save(retriever_index_base)
-    torch.save(pipeline.state_dict(), model_artifacts_dir / "final_model_state_dict.pt")
+    torch.save(clean_state_dict_for_save(pipeline), model_artifacts_dir / "final_model_state_dict.pt")
     save_training_checkpoint(
         model_artifacts_dir / "final_training_checkpoint.pt",
         pipeline=pipeline,
@@ -1276,6 +1415,7 @@ def main():
         epoch_records=epoch_records,
         dataset_source=dataset_source,
         class_weights=class_weights_by_label,
+        multi_gpu=multi_gpu_info,
     )
     write_json(
         model_artifacts_dir / "model_metadata.json",
@@ -1294,6 +1434,7 @@ def main():
             "derive_labels_from_report": args.derive_labels_from_report,
             "split_group": args.split_group,
             "split_diagnostics": split_info,
+            "multi_gpu": multi_gpu_info,
             "best_loss": best_loss,
             "best_metric_name": best_metric_name,
             "artifacts": {
@@ -1456,6 +1597,7 @@ def main():
         "derive_labels_from_report": args.derive_labels_from_report,
         "split_group": args.split_group,
         "split_diagnostics": split_info,
+        "multi_gpu": multi_gpu_info,
         "class_weighting": args.class_weighting,
         "class_weights": class_weights_by_label,
         "device": str(device),
