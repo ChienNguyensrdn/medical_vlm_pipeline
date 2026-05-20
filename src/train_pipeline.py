@@ -146,7 +146,7 @@ def is_device_usable(device: torch.device) -> bool:
 
 def select_device(requested_device: str = "auto") -> torch.device:
     if requested_device == "cuda":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         return device if is_device_usable(device) else torch.device("cpu")
     if requested_device == "mps":
         is_mps_available = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
@@ -156,7 +156,7 @@ def select_device(requested_device: str = "auto") -> torch.device:
         return torch.device("cpu")
 
     if torch.cuda.is_available():
-        device = torch.device("cuda")
+        device = torch.device("cuda:0")
         if is_device_usable(device):
             return device
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
