@@ -12,7 +12,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from medical_vlm_pipeline import PipelineConfig, MedicalVLMPipeline
+from medical_vlm_pipeline import PipelineConfig, MedicalVLMPipeline, TrustMedRAGPipeline
 from medical_vlm_pipeline.data import MedicalCase, MedicalCaseDataset
 from medical_vlm_pipeline.alignment import infonce_loss
 from medical_vlm_pipeline.explainability import retrieval_explanation, MedicalGradCAM
@@ -185,6 +185,27 @@ def main() -> None:
     logger.info(f"Generated Clinical Report:")
     logger.info(diagnosis_output.report)
     logger.info("=" * 60)
+
+    # 7b. Instantiate and run TrustMedRAGPipeline (Stage 10 Full Integration Demo)
+    logger.info("Instantiating Full TrustMed-RAG (10-Stage) Advanced Pipeline...")
+    trustmed_pipeline = TrustMedRAGPipeline(config, num_classes=3, class_names=["Healthy", "Meningioma", "Glioma"])
+    
+    logger.info("Building Aligned and Quantized Reference Vector Index for TrustMed-RAG...")
+    trustmed_pipeline.build_vector_index(loader)
+
+    logger.info("Running Advanced 10-Stage TrustMed-RAG Clinical Inference on Query Scan...")
+    # Run end-to-end full 10-stage diagnose
+    trustmed_output = trustmed_pipeline.diagnose(
+        query_image,
+        clinical_text="Enhancing mass along the right parietal convex convexity, typical for meningioma lesion."
+    )
+
+    logger.info("=" * 60)
+    logger.info("          ADVANCED TRUSTMED-RAG 10-STAGE DIAGNOSTIC SUMMARY          ")
+    logger.info("=" * 60)
+    logger.info(trustmed_output.summary())
+    logger.info("=" * 60)
+
 
     # 8. Contrastive InfoNCE Loss Validation (Stage 4 Alignment)
     logger.info("Validating Cross-modal Contrastive Loss calculation...")
