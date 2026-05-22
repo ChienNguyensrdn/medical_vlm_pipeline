@@ -163,6 +163,8 @@ data/images/
 *.nii.gz
 
 # Generated Kaggle training outputs
+artifacts/
+src/artifacts/
 report_kaggle/model_artifacts/
 report_kaggle/kaggle_train_stdout.log
 report_kaggle/case_index.csv
