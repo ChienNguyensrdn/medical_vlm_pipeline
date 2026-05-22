@@ -147,17 +147,19 @@ class MedicalVLMPipeline(nn.Module):
                 case_ids = batch["case_id"]
                 reports = batch["report_text"]
                 labels = batch["label"]
+                projections = batch.get("projection", [""] * len(case_ids))
 
                 # Extract aligned projections
                 projs = self.encode_image(images)
                 all_embeddings.append(projs.cpu())
                 all_case_ids.extend(case_ids)
 
-                for cid, rep, lbl in zip(case_ids, reports, labels):
+                for cid, rep, lbl, proj in zip(case_ids, reports, labels, projections):
                     all_metadata.append({
                         "case_id": cid,
                         "report_text": rep,
-                        "label": lbl
+                        "label": lbl,
+                        "projection": proj,
                     })
 
         # Concatenate reference features
@@ -515,10 +517,18 @@ class TrustMedRAGPipeline(nn.Module):
                 Z_v = self.encode_image(imgs)
                 all_embs.append(Z_v.cpu())
                 all_ids.extend(batch["case_id"])
-                for cid, rep, lbl in zip(
-                    batch["case_id"], batch["report_text"], batch["label"]
+                for cid, rep, lbl, proj in zip(
+                    batch["case_id"],
+                    batch["report_text"],
+                    batch["label"],
+                    batch.get("projection", [""] * len(batch["case_id"])),
                 ):
-                    all_meta.append({"case_id": cid, "report_text": rep, "label": lbl})
+                    all_meta.append({
+                        "case_id": cid,
+                        "report_text": rep,
+                        "label": lbl,
+                        "projection": proj,
+                    })
 
         ref = torch.cat(all_embs, dim=0)
         self.retriever.add(all_ids, ref, all_meta)
@@ -677,4 +687,3 @@ class TrustMedRAGPipeline(nn.Module):
     def forward(self, image: Tensor, clinical_text: str = "") -> TrustMedOutput:
         """Alias for diagnose() — supports nn.Module forward conventions."""
         return self.diagnose(image, clinical_text)
-

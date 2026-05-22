@@ -22,6 +22,7 @@ class MedicalCase:
     report_text: str
     label: str | None = None
     modality: str | None = None
+    projection: str | None = None
 
 
 class MedicalCaseDataset(Dataset):
@@ -127,6 +128,7 @@ class MedicalCaseDataset(Dataset):
             "report_text": case.report_text,
             "label": case.label if case.label is not None else "",
             "modality": case.modality if case.modality is not None else "",
+            "projection": case.projection if case.projection is not None else "",
         }
 
         if self.tokenizer is not None:
@@ -333,6 +335,7 @@ def load_iu_chest_xray_cases(
             report_text=caption,
             label=label,
             modality="Chest X-ray",
+            projection=projection,
         )
         cases.append(case)
 
@@ -348,6 +351,7 @@ def load_iu_chest_xray_cases(
                     report_text=case.report_text,
                     label=case.label if label_counts.get(case.label or "Other", 0) >= min_class_count else "Other",
                     modality=case.modality,
+                    projection=case.projection,
                 )
                 for case in cases
             ]

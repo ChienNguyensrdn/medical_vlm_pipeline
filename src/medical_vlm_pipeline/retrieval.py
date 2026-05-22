@@ -17,6 +17,7 @@ class RetrievalResult:
     score: float
     report_text: str | None = None
     label: str | None = None
+    projection: str | None = None
 
 
 class VectorRetriever:
@@ -156,6 +157,7 @@ class FAISSRetriever(VectorRetriever):
                     score=float(score),
                     report_text=meta.get("report_text"),
                     label=meta.get("label"),
+                    projection=meta.get("projection"),
                 ))
         else:
             # High-performance PyTorch vectorized search fallback
@@ -182,6 +184,7 @@ class FAISSRetriever(VectorRetriever):
                     score=float(score),
                     report_text=meta.get("report_text"),
                     label=meta.get("label"),
+                    projection=meta.get("projection"),
                 ))
 
         return results

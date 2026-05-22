@@ -389,6 +389,7 @@ def retrieval_results_to_dict(results: list[Any]) -> list[dict[str, Any]]:
             "case_id": item.case_id,
             "score": item.score,
             "label": item.label,
+            "projection": getattr(item, "projection", None),
             "report_text": item.report_text,
         }
         for item in results
@@ -405,6 +406,7 @@ def write_case_index(path: Path, cases: list[MedicalCase], split_group: str = "r
             "group_id",
             "image_path",
             "label",
+            "projection",
             "modality",
             "report_text",
         ]
@@ -418,6 +420,7 @@ def write_case_index(path: Path, cases: list[MedicalCase], split_group: str = "r
                 "group_id": case_group_key(case, split_group),
                 "image_path": str(case.image_path),
                 "label": case.label,
+                "projection": case.projection,
                 "modality": case.modality,
                 "report_text": case.report_text,
             })
@@ -797,6 +800,7 @@ def generate_synthetic_cases(num_cases: int = 24) -> list[MedicalCase]:
             report_text=report,
             label=projection,
             modality="Chest X-ray",
+            projection=projection,
         )
         cases.append(case)
     return cases
@@ -978,6 +982,9 @@ def main():
                 "train_label_counts": count_values([case.label or "" for case in train_cases]),
                 "validation_label_counts": count_values([case.label or "" for case in val_cases]),
                 "modality_counts": count_values([case.modality or "" for case in all_cases]),
+                "projection_counts": count_values([case.projection or "" for case in all_cases]),
+                "train_projection_counts": count_values([case.projection or "" for case in train_cases]),
+                "validation_projection_counts": count_values([case.projection or "" for case in val_cases]),
                 "sample_case_ids": [case.case_id for case in all_cases[:10]],
             },
             "environment": environment_snapshot(device),
@@ -1474,6 +1481,9 @@ def main():
             "derive_labels_from_report": args.derive_labels_from_report,
             "split_group": args.split_group,
             "split_diagnostics": split_info,
+            "projection_counts": count_values([case.projection or "" for case in all_cases]),
+            "train_projection_counts": count_values([case.projection or "" for case in train_cases]),
+            "validation_projection_counts": count_values([case.projection or "" for case in val_cases]),
             "class_weighting": args.class_weighting,
             "class_weights": class_weights_by_label,
             "device": str(device),
@@ -1552,6 +1562,9 @@ def main():
             "derive_labels_from_report": args.derive_labels_from_report,
             "split_group": args.split_group,
             "split_diagnostics": split_info,
+            "projection_counts": count_values([case.projection or "" for case in all_cases]),
+            "train_projection_counts": count_values([case.projection or "" for case in train_cases]),
+            "validation_projection_counts": count_values([case.projection or "" for case in val_cases]),
             "multi_gpu": multi_gpu_info,
             "best_loss": best_loss,
             "best_metric_name": best_metric_name,
@@ -1602,6 +1615,7 @@ def main():
                 "sample_index": idx,
                 "case_id": case.case_id,
                 "label": case.label,
+                "projection": case.projection,
                 "modality": case.modality,
                 "reference_report": ref_report,
                 "generated_report": cand_report,
@@ -1645,6 +1659,7 @@ def main():
             "sample_index",
             "case_id",
             "label",
+            "projection",
             "predicted_diagnosis",
             "confidence",
             "uncertainty",
@@ -1664,6 +1679,7 @@ def main():
                 "sample_index": sample["sample_index"],
                 "case_id": sample["case_id"],
                 "label": sample["label"],
+                "projection": sample.get("projection"),
                 "predicted_diagnosis": sample["predicted_diagnosis"],
                 "confidence": sample["confidence"],
                 "uncertainty": sample["uncertainty"],
@@ -1693,6 +1709,7 @@ def main():
     inference_report = {
         "case_id": train_cases[0].case_id,
         "label": train_cases[0].label,
+        "projection": train_cases[0].projection,
         "diagnosis": diag_out.diagnosis,
         "confidence": diag_out.confidence,
         "uncertainty": diag_out.uncertainty,
@@ -1715,6 +1732,9 @@ def main():
         "derive_labels_from_report": args.derive_labels_from_report,
         "split_group": args.split_group,
         "split_diagnostics": split_info,
+        "projection_counts": count_values([case.projection or "" for case in all_cases]),
+        "train_projection_counts": count_values([case.projection or "" for case in train_cases]),
+        "validation_projection_counts": count_values([case.projection or "" for case in val_cases]),
         "multi_gpu": multi_gpu_info,
         "class_weighting": args.class_weighting,
         "class_weights": class_weights_by_label,
