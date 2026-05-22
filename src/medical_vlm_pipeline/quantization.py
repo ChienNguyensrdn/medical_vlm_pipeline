@@ -121,6 +121,7 @@ class ProductQuantizer(LatentQuantizer):
 
         B = embeddings.shape[0]
         codes = torch.zeros(B, self.num_subvectors, dtype=torch.long, device=embeddings.device)
+        codebooks = self.codebooks.to(device=embeddings.device, dtype=embeddings.dtype)
 
         # Reshape: (B, M, sub_dim)
         reshaped = embeddings.view(B, self.num_subvectors, self.subvector_dim)
@@ -128,7 +129,7 @@ class ProductQuantizer(LatentQuantizer):
         for m in range(self.num_subvectors):
             # Compute Euclidean distance to all centroids in this sub-space
             sub_vectors = reshaped[:, m, :].unsqueeze(1)  # (B, 1, sub_dim)
-            centroids = self.codebooks[m].unsqueeze(0)    # (1, K, sub_dim)
+            centroids = codebooks[m].unsqueeze(0)  # (1, K, sub_dim)
             distances = torch.sum((sub_vectors - centroids) ** 2, dim=-1)  # (B, K)
             codes[:, m] = torch.argmin(distances, dim=-1)
 
@@ -142,9 +143,10 @@ class ProductQuantizer(LatentQuantizer):
         """Decode indices (B, M) back into full embeddings (B, D)."""
         B = codes.shape[0]
         reconstructed = torch.zeros(B, self.num_subvectors, self.subvector_dim, device=codes.device, dtype=torch.float32)
+        codebooks = self.codebooks.to(device=codes.device, dtype=reconstructed.dtype)
 
         for m in range(self.num_subvectors):
-            reconstructed[:, m, :] = self.codebooks[m][codes[:, m]]
+            reconstructed[:, m, :] = codebooks[m][codes[:, m]]
 
         return reconstructed.view(B, self.embedding_dim)
 
