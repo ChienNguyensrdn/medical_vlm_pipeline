@@ -124,6 +124,20 @@ def parse_args() -> argparse.Namespace:
         help="Disable CUDA automatic mixed precision.",
     )
     parser.add_argument(
+        "--eval-contrastive",
+        action="store_true",
+        help="Also compute contrastive loss during evaluation. Slower because it re-encodes images/text.",
+    )
+    parser.add_argument(
+        "--train-eval-every",
+        type=int,
+        default=0,
+        help=(
+            "Run a full train-loader evaluation every N epochs. 0 uses cheap in-epoch "
+            "classification metrics and avoids an extra full train pass."
+        ),
+    )
+    parser.add_argument(
         "--allow-device-fallback",
         action="store_true",
         help="Allow explicit cuda/mps requests to fall back to CPU. By default explicit accelerator requests fail fast.",
@@ -138,6 +152,11 @@ def parse_args() -> argparse.Namespace:
         "--skip-plot",
         action="store_true",
         help="Skip Matplotlib training curve generation for faster local smoke tests.",
+    )
+    parser.add_argument(
+        "--skip-post-train",
+        action="store_true",
+        help="Skip retriever indexing, text generation, and final diagnosis after training.",
     )
     return parser.parse_args()
 
@@ -537,6 +556,85 @@ def compute_class_weights(
     return weights.to(device)
 
 
+def classification_metrics_from_predictions(
+    all_targets: list[int],
+    all_preds: list[int],
+    class_names: list[str],
+) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "accuracy": 0.0,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1_score": 0.0,
+        "macro_precision": 0.0,
+        "macro_recall": 0.0,
+        "macro_f1_score": 0.0,
+        "per_class_metrics": {},
+        "confusion_matrix": [],
+    }
+    if not all_targets:
+        return metrics
+
+    try:
+        from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_fscore_support
+
+        metrics["accuracy"] = float(accuracy_score(all_targets, all_preds))
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            all_targets,
+            all_preds,
+            average="weighted",
+            zero_division=0,
+        )
+        macro_precision, macro_recall, macro_f1, _ = precision_recall_fscore_support(
+            all_targets,
+            all_preds,
+            average="macro",
+            zero_division=0,
+        )
+        class_precision, class_recall, class_f1, class_support = precision_recall_fscore_support(
+            all_targets,
+            all_preds,
+            labels=list(range(len(class_names))),
+            average=None,
+            zero_division=0,
+        )
+        metrics.update({
+            "precision": float(precision),
+            "recall": float(recall),
+            "f1_score": float(f1),
+            "macro_precision": float(macro_precision),
+            "macro_recall": float(macro_recall),
+            "macro_f1_score": float(macro_f1),
+            "confusion_matrix": confusion_matrix(
+                all_targets,
+                all_preds,
+                labels=list(range(len(class_names))),
+            ).tolist(),
+            "per_class_metrics": {
+                class_name: {
+                    "precision": float(class_precision[idx]),
+                    "recall": float(class_recall[idx]),
+                    "f1_score": float(class_f1[idx]),
+                    "support": int(class_support[idx]),
+                }
+                for idx, class_name in enumerate(class_names)
+            },
+        })
+    except ImportError:
+        correct = sum(1 for pred, target in zip(all_preds, all_targets) if pred == target)
+        accuracy = correct / len(all_targets)
+        metrics.update({
+            "accuracy": accuracy,
+            "precision": accuracy,
+            "recall": accuracy,
+            "f1_score": accuracy,
+            "macro_precision": accuracy,
+            "macro_recall": accuracy,
+            "macro_f1_score": accuracy,
+        })
+    return metrics
+
+
 def evaluate_loader(
     pipeline: MedicalVLMPipeline,
     loader: DataLoader,
@@ -587,74 +685,8 @@ def evaluate_loader(
         "total_loss": total_loss / total_batches if total_batches else 0.0,
         "contrastive_loss": total_contrastive / total_batches if total_batches else 0.0,
         "classification_loss": total_class / total_batches if total_batches else 0.0,
-        "accuracy": 0.0,
-        "precision": 0.0,
-        "recall": 0.0,
-        "f1_score": 0.0,
-        "macro_precision": 0.0,
-        "macro_recall": 0.0,
-        "macro_f1_score": 0.0,
-        "per_class_metrics": {},
-        "confusion_matrix": [],
     }
-    if not all_targets:
-        return metrics
-
-    try:
-        from sklearn.metrics import accuracy_score, confusion_matrix, precision_recall_fscore_support
-
-        metrics["accuracy"] = float(accuracy_score(all_targets, all_preds))
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            all_targets,
-            all_preds,
-            average="weighted",
-            zero_division=0,
-        )
-        metrics["precision"] = float(precision)
-        metrics["recall"] = float(recall)
-        metrics["f1_score"] = float(f1)
-        macro_precision, macro_recall, macro_f1, _ = precision_recall_fscore_support(
-            all_targets,
-            all_preds,
-            average="macro",
-            zero_division=0,
-        )
-        metrics["macro_precision"] = float(macro_precision)
-        metrics["macro_recall"] = float(macro_recall)
-        metrics["macro_f1_score"] = float(macro_f1)
-        class_precision, class_recall, class_f1, class_support = precision_recall_fscore_support(
-            all_targets,
-            all_preds,
-            labels=list(range(len(class_names))),
-            average=None,
-            zero_division=0,
-        )
-        metrics["confusion_matrix"] = confusion_matrix(
-            all_targets,
-            all_preds,
-            labels=list(range(len(class_names))),
-        ).tolist()
-        metrics["per_class_metrics"] = {
-            class_name: {
-                "precision": float(class_precision[idx]),
-                "recall": float(class_recall[idx]),
-                "f1_score": float(class_f1[idx]),
-                "support": int(class_support[idx]),
-            }
-            for idx, class_name in enumerate(class_names)
-        }
-    except ImportError:
-        correct = sum(1 for pred, target in zip(all_preds, all_targets) if pred == target)
-        accuracy = correct / len(all_targets)
-        metrics.update({
-            "accuracy": accuracy,
-            "precision": accuracy,
-            "recall": accuracy,
-            "f1_score": accuracy,
-            "macro_precision": accuracy,
-            "macro_recall": accuracy,
-            "macro_f1_score": accuracy,
-        })
+    metrics.update(classification_metrics_from_predictions(all_targets, all_preds, class_names))
     return metrics
 
 
@@ -1101,6 +1133,8 @@ def main():
         epoch_loss = 0.0
         epoch_contrastive = 0.0
         epoch_class = 0.0
+        train_epoch_preds: list[int] = []
+        train_epoch_targets: list[int] = []
 
         progress_bar = tqdm(
             train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False, dynamic_ncols=True
@@ -1120,6 +1154,10 @@ def main():
                 # A. Classification Loss via forward
                 classification_logits = pipeline(images)
                 classification_loss = classification_criterion(classification_logits, label_idxs)
+                train_epoch_preds.extend(
+                    torch.argmax(classification_logits.detach(), dim=-1).cpu().tolist()
+                )
+                train_epoch_targets.extend(label_idxs.detach().cpu().tolist())
 
                 # B. Cross-modal Contrastive Loss via embeddings
                 # For InfoNCE, we require tokenized input_ids
@@ -1160,14 +1198,31 @@ def main():
         avg_contrastive = epoch_contrastive / num_batches
         avg_class = epoch_class / num_batches
 
-        train_eval = evaluate_loader(
-            pipeline,
-            train_loader,
-            label_to_idx,
-            class_names,
-            device,
-            classification_criterion,
+        should_full_train_eval = (
+            args.train_eval_every > 0
+            and (epoch % args.train_eval_every == 0 or epoch == epochs)
         )
+        if should_full_train_eval:
+            train_eval = evaluate_loader(
+                pipeline,
+                train_loader,
+                label_to_idx,
+                class_names,
+                device,
+                classification_criterion,
+                use_contrastive=args.eval_contrastive,
+            )
+        else:
+            train_eval = classification_metrics_from_predictions(
+                train_epoch_targets,
+                train_epoch_preds,
+                class_names,
+            )
+            train_eval.update({
+                "total_loss": avg_loss,
+                "contrastive_loss": avg_contrastive,
+                "classification_loss": avg_class,
+            })
         val_eval = (
             evaluate_loader(
                 pipeline,
@@ -1176,6 +1231,7 @@ def main():
                 class_names,
                 device,
                 classification_criterion,
+                use_contrastive=args.eval_contrastive,
             )
             if val_loader is not None
             else None
@@ -1386,6 +1442,68 @@ def main():
                 multi_gpu=multi_gpu_info,
             )
             logger.info(f"New best model saved successfully to: {checkpoint_path}")
+
+    if args.skip_post_train:
+        run_duration_sec = time.perf_counter() - run_timer_start
+        torch.save(clean_state_dict_for_save(pipeline), model_artifacts_dir / "final_model_state_dict.pt")
+        save_training_checkpoint(
+            model_artifacts_dir / "final_training_checkpoint.pt",
+            pipeline=pipeline,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epoch=epochs,
+            best_loss=best_loss,
+            config=config,
+            class_names=class_names,
+            label_to_idx=label_to_idx,
+            epoch_records=epoch_records,
+            dataset_source=dataset_source,
+            class_weights=class_weights_by_label,
+            multi_gpu=multi_gpu_info,
+        )
+        artifacts_manifest = {
+            "run_started_at": run_started_at,
+            "run_finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "run_duration_sec": run_duration_sec,
+            "best_loss": best_loss,
+            "dataset_source": dataset_source,
+            "num_cases": len(all_cases),
+            "num_train_cases": len(train_cases),
+            "num_validation_cases": len(val_cases),
+            "target_column": args.target_column,
+            "derive_labels_from_report": args.derive_labels_from_report,
+            "split_group": args.split_group,
+            "split_diagnostics": split_info,
+            "class_weighting": args.class_weighting,
+            "class_weights": class_weights_by_label,
+            "device": str(device),
+            "multi_gpu": multi_gpu_info,
+            "post_train_skipped": True,
+            "artifacts": {
+                "checkpoint": str(Path("best_model.pt")),
+                "best_model_state_dict": str(model_artifacts_dir / "best_model_state_dict.pt"),
+                "final_model_state_dict": str(model_artifacts_dir / "final_model_state_dict.pt"),
+                "final_training_checkpoint": str(model_artifacts_dir / "final_training_checkpoint.pt"),
+                "label_map": str(model_artifacts_dir / "label_map.json"),
+                "case_index": str(metrics_dir / "case_index.csv"),
+                "train_case_index": str(metrics_dir / "train_case_index.csv"),
+                "validation_case_index": str(metrics_dir / "validation_case_index.csv"),
+                "run_config": str(metrics_dir / "run_config.json"),
+                "environment": str(metrics_dir / "environment.json"),
+                "training_metrics_csv": str(metrics_file),
+                "epoch_metrics_json": str(metrics_dir / "epoch_metrics.json"),
+            },
+        }
+        write_json(metrics_dir / "artifacts_manifest.json", artifacts_manifest)
+        write_json(
+            metrics_dir / "run_summary.json",
+            {
+                **artifacts_manifest,
+                "last_epoch": epoch_records[-1] if epoch_records else None,
+            },
+        )
+        logger.info("Skipping post-training retriever/text-generation stages as requested.")
+        return
 
     # 7. Post-Training Index Generation
     console.print("\n[bold cyan]============================================================[/bold cyan]")

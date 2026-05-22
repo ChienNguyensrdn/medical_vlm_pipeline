@@ -1,68 +1,98 @@
-# Quantized Medical VLM Pipeline - Implementation Checklist
+# TrustMed-RAG / Medical VLM Pipeline - Implementation Checklist
 
-This checklist tracks the progress of the 10-stage Quantized Retrieval-Augmented Medical Vision-Language Diagnosis Pipeline.
+Checklist này phản ánh trạng thái hiện tại của repo: phần nào đã có code và smoke test, phần nào mới là POC, và phần nào cần làm tiếp trước khi coi là bản training/evaluation ổn định.
 
----
+## 1. Documentation And Research Framing
 
-## 📋 Giai đoạn 1: Chuẩn bị & Xử lý Dữ liệu (Data Collection & Loader)
-- [x] Triển khai bộ nạp dữ liệu PyTorch `MedicalCaseDataset` tùy biến phục vụ dữ liệu y khoa ghép cặp (Ảnh - Báo cáo).
-- [x] Hỗ trợ đọc đa định dạng ảnh y tế: Ảnh 2D tiêu chuẩn (PNG/JPG), ảnh chụp DICOM y tế (`pydicom`/`MONAI`) và ảnh quét thể tích 3D NIfTI (`nibabel`).
-- [x] Tích hợp cơ chế **Synthetic Data Fallback** tự động tạo lập ảnh giả lập (2D/3D) khi thiếu file ảnh vật lý, chống sập hệ thống trong môi trường thử nghiệm.
-- [x] Cấu hình tiền xử lý tự động thích ứng với cấu hình 2D hoặc 3D (`MONAI.transforms` và `torchvision.transforms`).
+- [x] Cập nhật `medical_vlm_pipeline.md` sang hướng TrustMed-RAG 10-stage.
+- [x] Bổ sung mục tiêu nghiên cứu: retrieval, grounding, knowledge graph, uncertainty, reasoning, controlled generation.
+- [x] Đề xuất cấu trúc paper và tên đề tài.
+- [x] Tách rõ trạng thái implemented/partial/planned trong tài liệu.
+- [ ] Bổ sung bảng mapping paper references trong `paper-refs/` vào related work.
 
-## 📋 Giai đoạn 2: Trích xuất đặc trưng hình ảnh (Medical Image Encoder)
-- [x] Tích hợp bộ mã hóa `MedicalImageEncoder` hỗ trợ đa dạng Backbone học sâu từ thư viện `timm` (Swin Transformer, ResNet, ConvNeXt).
-- [x] Hiện thực hóa bộ chiếu thể tích **3D Spatial Projector** (kết hợp Convolutions 3D và Adaptive Pooling) để nén lát quét 3D (MRI/CT) thành không gian biểu diễn 2D đặc trưng.
-- [x] Triển khai cơ chế **CNN Fallback** độc lập chạy ngoại tuyến mượt mà không phụ thuộc vào thư viện tải weights bên ngoài.
+## 2. Dataset And Labeling
 
-## 📋 Giai đoạn 3: Trích xuất đặc trưng lâm sàng (Clinical Text Encoder)
-- [x] Hiện thực hóa `ClinicalTextEncoder` hỗ trợ các mô hình chuyên biệt cho y khoa như PubMedBERT hay ClinicalBERT qua thư viện `transformers`.
-- [x] Tích hợp bộ **Tokenizer** và **Model Fallback** tự động chuyển sang BERT tiêu chuẩn hoặc mô hình mạng LSTM hai chiều dự phòng khi kết nối mạng lỗi.
+- [x] `MedicalCaseDataset` hỗ trợ paired image-report data.
+- [x] Hỗ trợ PNG/JPG, DICOM, NIfTI và synthetic fallback.
+- [x] Sửa weak-label extraction để hiểu negation như `no pneumothorax`, `negative for pleural effusion`.
+- [x] Tạo audit thống kê lớp từ Kaggle output.
+- [x] Phát hiện vấn đề lệch lớp: Normal khoảng 69%.
+- [x] Phát hiện split leak cũ theo image/report.
+- [x] Thêm grouped split theo `report` để tránh train/validation leakage.
+- [ ] Chuyển bài toán chính sang binary Normal vs Abnormal hoặc multi-label nếu cần paper mạnh hơn.
 
-## 📋 Giai đoạn 4: Căn chỉnh liên phương thức đối sánh (Cross-modal Alignment)
-- [x] Hiện thực hóa lớp tính toán độ lỗi **InfoNCE Loss** đối xứng để căn chỉnh ảnh y tế và báo cáo lâm sàng vào một không gian latent chung.
-- [x] Tối ưu nhiệt độ tự điều chỉnh (dưới dạng tham số có thể huấn luyện `temperature`).
+## 3. Core Baseline Pipeline
 
-## 📋 Giai đoạn 5: Không gian Latent thu gọn & Lượng tử hóa (Quantization)
-- [x] Hiện thực hóa **Product Quantization (PQ)**: Chia nhỏ vector đặc trưng chung thành $M$ vector con để gom cụm K-Means, giảm 90%+ kích thước chỉ mục vector DB.
-- [x] Hiện thực hóa lớp học tập lượng tử **Vector Quantization (VQ-STE)** huấn luyện trực tiếp qua kỹ thuật ước lượng thẳng dòng **Straight-Through Estimator (STE)** giúp truyền ngược gradient thông qua thao tác rời rạc hóa `argmax`.
+- [x] `MedicalVLMPipeline` chạy end-to-end: image encoder, text encoder, projection, quantizer, retriever, diagnosis head, report generator.
+- [x] InfoNCE contrastive loss đã có trong training loop.
+- [x] Product Quantization và FAISS retriever đã có fallback an toàn.
+- [x] Diagnosis head có MC Dropout uncertainty.
+- [x] Text generation có FLAN-T5/fallback template.
+- [x] GradCAM/retrieval explanation hooks đã có.
+- [x] Smoke test baseline và TrustMed modules pass local.
 
-## 📋 Giai đoạn 6: Chẩn đoán truy hồi (Retrieval-Augmented Diagnosis)
-- [x] Triển khai bộ kết xuất vector **FAISSRetriever** sử dụng tìm kiếm Cosine Similarity (`IndexFlatIP`) và Euclidean (`IndexFlatL2`).
-- [x] Hỗ trợ tuần tự hóa (serialization) chỉ mục vector DB ghi/nạp trực tiếp từ đĩa.
-- [x] Tích hợp cơ chế **PyTorch Vectorized Similarity Fallback** tự động thay thế nếu môi trường triển khai chưa có cài đặt FAISS.
+## 4. TrustMed-RAG 10-Stage Modules
 
-## 📋 Giai đoạn 7: Đầu phân loại bệnh lý (Diagnosis Head)
-- [x] Triển khai bộ phân loại `DiagnosisHead` học trên đặc trưng ảnh chung đã được lượng tử hóa để đưa ra nhãn bệnh lý và độ tự tin (confidence score).
+- [x] Stage 1: Data preprocessing/data loader.
+- [x] Stage 2: Vision-language encoding.
+- [x] Stage 3: Lesion/anatomy grounding module POC.
+- [x] Stage 4: Retrieval-augmented evidence search.
+- [x] Stage 5: Dynamic medical knowledge graph builder and encoder POC.
+- [x] Stage 6: Adaptive multimodal fusion module POC.
+- [x] Stage 7: Uncertainty estimator POC.
+- [x] Stage 8: Clinical reasoning agent POC.
+- [x] Stage 9: Controlled report generation through generator plus uncertainty/recommendation text.
+- [x] Stage 10: Offline metrics and smoke tests.
+- [ ] Train loop vẫn đang train `MedicalVLMPipeline`; chưa fine-tune full `TrustMedRAGPipeline` end-to-end.
+- [ ] Grounding/KG/reasoning hiện là POC heuristic/neural hybrid, chưa được supervised bằng ground-truth region labels.
 
-## 📋 Giai đoạn 8: Sinh báo cáo y khoa tự động (Clinical Report Generation)
-- [x] Hiện thực hóa `LLMReportGenerator` hỗ trợ Seq2Seq với Visual Prefix (FLAN-T5).
-- [x] Triển khai bộ **Clinical Template Synthesizer Fallback** tổng hợp chẩn đoán và trích xuất bệnh án mẫu từ vector truy vấn lịch sử để tự động tạo báo cáo chất lượng cao ngay cả khi chạy offline.
+## 5. Training Improvements
 
-## 📋 Giai đoạn 9: Giải thích trực quan & Độ tin cậy (Explainability)
-- [x] Hiện thực hóa bộ giải thích **MedicalGradCAM** tự thích ứng linh hoạt với ảnh 2D, ảnh thể tích 3D, và cơ chế chuyển đổi chiều không gian của Patch Tokens trong Vision Transformer (ViT/Swin).
-- [x] Tích hợp trích xuất giải thích tương đồng văn bản từ các ca bệnh lịch sử.
+- [x] Thêm class weighting mặc định `balanced`.
+- [x] Thêm macro precision/recall/F1 để tránh accuracy đẹp giả trên dataset lệch lớp.
+- [x] Thêm per-class metrics và confusion matrix vào CSV/JSON.
+- [x] Lưu `label_map.json`, class weights, checkpoints, metadata, run config.
+- [x] Thêm `--train-eval-every 0` để tránh full train re-eval mỗi epoch.
+- [x] Thêm `--eval-contrastive` optional vì contrastive eval tốn thời gian.
+- [x] Thêm `--skip-post-train` để smoke test epoch 1 không mất thời gian build index/sinh báo cáo.
+- [ ] Cần chạy lại Kaggle 1 epoch với `--skip-post-train` để đo đúng tốc độ train.
+- [ ] Cần chạy lại full 150 epoch sau khi xác nhận GPU/multi-GPU thật sự hoạt động.
 
-## 📋 Giai đoạn 10: Tối ưu hóa triển khai (Deployment Optimization)
-- [x] Thiết lập mã nguồn dưới dạng gói package Python độc lập cấu trúc rõ ràng.
-- [x] Xây dựng tệp cấu hình trung tâm `config.py` linh hoạt.
-- [x] Tạo lập tệp tin Kaggle Notebook mẫu **`run_on_kaggle.ipynb`** hỗ trợ triển khai huấn luyện siêu tốc trên GPU đám mây.
-- [x] Tích hợp bộ đo lường và theo dõi hiệu năng từng bước xử lý (**Step-by-step Performance Profiler**) cho luồng chẩn đoán đầu cuối (latency, shapes, codebooks, reconstruction MSE, similarity scores).
-- [x] Vượt qua tất cả kiểm thử kiểm nghiệm toàn trình `demo_pipeline.py` với tỉ lệ thành công **100%**.
+## 6. Kaggle And GPU Workflow
 
----
+- [x] `run_on_kaggle.ipynb` clone/pull source mới từ GitHub.
+- [x] Notebook kiểm tra CUDA và cài PyTorch wheel tương thích T4 khi cần.
+- [x] Fail fast nếu yêu cầu CUDA nhưng phải fallback CPU.
+- [x] Thêm grouped split, class weighting, macro metrics vào notebook.
+- [x] Thêm T4x2 config: `MULTI_GPU`, `GPU_IDS`, global batch size.
+- [x] Thêm `nvidia-smi` monitor log để kiểm tra GPU utilization.
+- [x] Tắt `CUDA_LAUNCH_BLOCKING` mặc định để tránh train chậm khi không debug CUDA.
+- [ ] Cần xác nhận từ Kaggle log rằng `multi_gpu.enabled=true`.
+- [ ] Cần kiểm tra `nvidia_smi_during_train.csv` để xem cả GPU 0 và GPU 1 có utilization/memory hay không.
 
-## 🚀 Các Bước Tiếp Theo (Future Roadmap)
+## 7. Artifacts And Reproducibility
 
-1. **Huấn luyện với Dữ liệu Y tế thực tế (Real-world Medical Training):**
-   - Đưa mô hình lên chạy trên nền tảng Kaggle GPU qua tệp `run_on_kaggle.ipynb`.
-   - Kết nối với các kho dữ liệu y khoa mở thực tế như **MIMIC-CXR** (ảnh X-quang phổi ghép cặp báo cáo) hoặc **BraTS** (ảnh cộng hưởng từ MRI não 3D).
+- [x] Xuất `training_metrics.csv`, `epoch_metrics.json`, `run_config.json`, `environment.json`.
+- [x] Xuất best/final model state dict và training checkpoint.
+- [x] Xuất retriever index khi không dùng `--skip-post-train`.
+- [x] Package artifacts trong notebook.
+- [x] Thêm dataset audit local trong `report_kaggle`.
+- [ ] Không commit artifact Kaggle lớn vào repo trừ khi cần release kết quả.
+- [ ] Nên chuyển PDF/paper refs lớn sang Git LFS hoặc chỉ lưu citation metadata.
 
-2. **Fine-tuning mô hình ngôn ngữ (Seq2Seq / LLM Fine-tuning):**
-   - [x] Đã tích hợp và tự động đánh giá các metric NLP y khoa tiêu chuẩn: **BLEU-1**, **BLEU-4**, **ROUGE-L** bằng `nltk` (với cơ chế lcs fallback an toàn).
-   - [x] Tự động xuất kết quả đánh giá sinh báo cáo lâm sàng ra tệp **`report_kaggle/text_generation_metrics.json`**.
+## 8. Validation Status
 
-3. **Cải tiến độ tin cậy và phân tích sai lệch (Uncertainty Estimation):**
-   - [x] Triển khai thành công phương pháp **Monte Carlo (MC) Dropout** trên đầu phân loại `DiagnosisHead`.
-   - [x] Tự động ước lượng **Epistemic Uncertainty (độ không chắc chắn nhận thức)** thông qua Entropy của phân phối xác xuất lấy mẫu đa lần ($N=20$) ngay trong luồng `pipeline.diagnose()`.
-   - [x] Đã kiểm nghiệm toàn trình qua `demo_pipeline.py` và hiển thị trực quan chỉ số Entropy trên báo cáo.
+- [x] `python -m compileall src/medical_vlm_pipeline src/train_pipeline.py` pass.
+- [x] `pytest -q src/tests` pass: 7 tests.
+- [x] Local smoke train CPU pass.
+- [ ] Kaggle T4x2 smoke run còn cần xác nhận bằng log mới.
+- [ ] Full training report sau grouped split/weak label fix chưa có kết quả cuối.
+
+## 9. Immediate Next Steps
+
+1. Push code/docs hiện tại lên GitHub.
+2. Trên Kaggle, pull commit mới nhất.
+3. Chạy `EPOCHS=1`, `SKIP_POST_TRAIN=True`, `TRAIN_EVAL_EVERY=0`, `CUDA_LAUNCH_BLOCKING=False`.
+4. Kiểm tra `environment.json` và `nvidia_smi_during_train.csv`.
+5. Nếu GPU ổn, chạy lại full train 150 epoch.
+6. Sau khi có kết quả mới, phân tích macro F1, per-class recall, confusion matrix.
